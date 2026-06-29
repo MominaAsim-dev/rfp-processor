@@ -125,7 +125,7 @@ class RFPProcessor:
     # ============================================================
     # 🆕 NEW: Go/No-Go Analysis Method
     # ============================================================
-    def go_no_go_analysis(self, text: str) -> Dict[str, Any]:
+       def go_no_go_analysis(self, text: str) -> Dict[str, Any]:
         """Perform Go/No-Go analysis on RFP"""
         
         prompt = f"""
