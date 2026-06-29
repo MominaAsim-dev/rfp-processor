@@ -121,3 +121,67 @@ class RFPProcessor:
                 },
                 "error": str(e)
             }
+    
+    # ============================================================
+    # 🆕 NEW: Go/No-Go Analysis Method
+    # ============================================================
+    def go_no_go_analysis(self, text: str) -> Dict[str, Any]:
+        """Perform Go/No-Go analysis on RFP"""
+        
+        prompt = f"""
+        You are a Bid/No-Bid decision expert. Analyze this RFP and provide a Go/No-Go recommendation.
+        
+        Evaluate these 5 key criteria (each scored 0-10):
+        1. STRATEGIC FIT: Does this align with our business goals?
+        2. CAPABILITY: Can we deliver successfully?
+        3. COMPETITIVENESS: Can we win?
+        4. FINANCIAL: Is it profitable?
+        5. RISK: Are risks acceptable?
+        
+        RFP Text:
+        {text[:8000]}
+        
+        Return ONLY valid JSON in this format:
+        {{
+            "decision": "GO" or "NO-GO" or "CONSIDER",
+            "score": 85,
+            "criteria": {{
+                "Strategic Fit": {{"score": 9, "passed": true, "explanation": "..."}},
+                "Capability": {{"score": 8, "passed": true, "explanation": "..."}},
+                "Competitiveness": {{"score": 7, "passed": true, "explanation": "..."}},
+                "Financial": {{"score": 6, "passed": true, "explanation": "..."}},
+                "Risk": {{"score": 5, "passed": false, "explanation": "..."}}
+            }},
+            "strengths": ["Strength 1", "Strength 2"],
+            "risks": ["Risk 1", "Risk 2"],
+            "recommendation": "Brief recommendation summary"
+        }}
+        
+        Rules:
+        - Score >= 70 = GO
+        - Score 50-69 = CONSIDER (with conditions)
+        - Score < 50 = NO-GO
+        - Be specific and practical
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            json_str = response.text.strip()
+            
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(json_str)
+            return result
+            
+        except Exception as e:
+            return {
+                "decision": "NO-GO",
+                "score": 0,
+                "criteria": {},
+                "strengths": ["Unable to analyze"],
+                "risks": ["Error in analysis"],
+                "recommendation": f"Error: {str(e)}"
+            }
