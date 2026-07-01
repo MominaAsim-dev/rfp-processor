@@ -23,7 +23,7 @@ def main():
     Upload your RFP document and the AI will automatically evaluate it against our company checklist.
     """)
     
-    # Sidebar
+    # Sidebar for API Key
     with st.sidebar:
         st.header("⚙️ Configuration")
         
@@ -91,7 +91,7 @@ def main():
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
     
-    # Display results
+    # Display results if processed
     if 'processed' in st.session_state and st.session_state['processed']:
         results = st.session_state['results']
         
@@ -194,7 +194,7 @@ def main():
                 for category, items in categories.items():
                     st.markdown(f"#### 🏢 {category} Department")
                     
-                    # Create table
+                    # Create table data
                     table_data = []
                     for item in items:
                         status = item.get('status', 'UNKNOWN')
