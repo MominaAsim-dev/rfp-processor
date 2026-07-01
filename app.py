@@ -20,14 +20,10 @@ def main():
     
     st.markdown("""
     ### 🤖 AI-Powered RFP Analysis with Company Checklist
-    Upload your RFP document and the AI will automatically evaluate it against our company checklist:
-    - **📦 Deliverables** - What needs to be provided
-    - **📊 Evaluation Criteria** - How your proposal will be judged
-    - **✅ Compliance Checklist** - Department-specific tasks
-    - **🎯 Go/No-Go Decision** - Strictly based on company checklist
+    Upload your RFP document and the AI will automatically evaluate it against our company checklist.
     """)
     
-    # Sidebar for API Key
+    # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuration")
         
@@ -48,10 +44,8 @@ def main():
         ### 📌 Instructions
         1. Upload your RFP document (PDF, DOCX, or TXT)
         2. Click "Process Document"
-        3. View Go/No-Go decision with detailed breakdown
+        3. View Go/No-Go decision with detailed checklist
         """)
-        
-        st.info("🤖 Using Google Gemini AI")
     
     # File uploader
     uploaded_file = st.file_uploader(
@@ -92,12 +86,12 @@ def main():
                     
                     os.unlink(file_path)
                 
-                st.success("✅ Document processed successfully with Gemini!")
+                st.success("✅ Document processed successfully!")
                 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
     
-    # Display results if processed
+    # Display results
     if 'processed' in st.session_state and st.session_state['processed']:
         results = st.session_state['results']
         
@@ -119,146 +113,124 @@ def main():
         go_no_go = results.get('go_no_go', {})
         
         if go_no_go:
-            decision = go_no_go.get('overall_decision', 'NO DECISION')
+            decision = go_no_go.get('overall_decision', 'UNDECIDED')
             score = go_no_go.get('overall_score', 0)
             
-            # Determine colors and icons
             if decision == "GO":
                 bg_color = "#d4edda"
                 border_color = "#28a745"
                 emoji = "✅"
                 title = "GO"
-                subtitle = "We Should Bid!"
             elif decision == "NO-GO":
                 bg_color = "#f8d7da"
                 border_color = "#dc3545"
                 emoji = "❌"
                 title = "NO-GO"
-                subtitle = "We Should Not Bid"
-            elif decision == "CONDITIONAL":
+            elif decision in ["CONDITIONAL", "CONSIDER"]:
                 bg_color = "#fff3cd"
                 border_color = "#ffc107"
                 emoji = "⚠️"
                 title = "CONDITIONAL"
-                subtitle = "Proceed with Conditions"
             else:
                 bg_color = "#e2e3e5"
                 border_color = "#6c757d"
                 emoji = "❓"
                 title = "UNDECIDED"
-                subtitle = "Needs Further Review"
             
-            # Big Decision Box
             st.markdown(f"""
             <div style="
                 background-color: {bg_color};
-                border: 4px solid {border_color};
+                border: 5px solid {border_color};
                 border-radius: 15px;
                 padding: 30px;
                 text-align: center;
                 margin: 20px 0;
             ">
-                <h1 style="font-size: 60px; margin: 0;">{emoji}</h1>
-                <h1 style="font-size: 48px; margin: 10px 0; color: {border_color};">
+                <div style="font-size: 72px;">{emoji}</div>
+                <div style="font-size: 48px; font-weight: bold; color: {border_color};">
                     {title}
-                </h1>
-                <h2 style="font-size: 24px; margin: 0; color: #333;">
-                    {subtitle}
-                </h2>
-                <div style="
-                    font-size: 28px;
-                    font-weight: bold;
-                    margin: 15px 0;
-                    color: {border_color};
-                ">
+                </div>
+                <div style="font-size: 24px; margin-top: 10px; color: #333;">
                     Score: {score}/100
+                </div>
+                <div style="font-size: 18px; margin-top: 10px; color: #555;">
+                    {go_no_go.get('summary', '')}
                 </div>
             </div>
             """, unsafe_allow_html=True)
             
-            # Progress Bar for Score
             st.markdown("### 📊 Overall Score")
-            st.progress(score / 100)
+            st.progress(score / 100 if score > 0 else 0)
             
-            # Summary
-            st.markdown("### 📝 Recommendation Summary")
-            st.info(go_no_go.get('recommendation', 'No summary available'))
-            
-            # ============================================================
-            # DETAILED CHECKLIST RESULTS
-            # ============================================================
-            
-            st.markdown("---")
-            st.markdown("### 📋 Detailed Checklist Evaluation")
-            
-            checklist_results = go_no_go.get('checklist_results', {})
-            
-            # Summary Stats
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("✅ GO Items", len(go_no_go.get('go_items', [])))
+                st.metric("✅ GO Items", go_no_go.get('go_count', 0))
             with col2:
-                st.metric("❌ NO-GO Items", len(go_no_go.get('no_go_items', [])))
+                st.metric("❌ NO-GO Items", go_no_go.get('no_go_count', 0))
             with col3:
-                st.metric("⚠️ Conditional", len(go_no_go.get('conditional_items', [])))
+                st.metric("⚠️ Conditional", go_no_go.get('conditional_count', 0))
             
             st.markdown("---")
             
-            # Display each department's checklist
-            if checklist_results:
-                for dept, criteria in checklist_results.items():
-                    st.markdown(f"### 🏢 {dept} Department")
+            # ============================================================
+            # 📋 CHECKLIST TABLE
+            # ============================================================
+            
+            st.markdown("### 📋 Checklist Evaluation")
+            st.markdown("Each checklist item is compared against the RFP document.")
+            
+            checklist = go_no_go.get('checklist', [])
+            
+            if checklist:
+                # Group by category
+                categories = {}
+                for item in checklist:
+                    cat = item.get('category', 'Other')
+                    if cat not in categories:
+                        categories[cat] = []
+                    categories[cat].append(item)
+                
+                # Display each category
+                for category, items in categories.items():
+                    st.markdown(f"#### 🏢 {category} Department")
                     
-                    for criterion, details in criteria.items():
-                        status = details.get('status', 'UNKNOWN')
-                        reason = details.get('reason', '')
-                        evidence = details.get('evidence', '')
-                        
+                    # Create table
+                    table_data = []
+                    for item in items:
+                        status = item.get('status', 'UNKNOWN')
                         if status == "GO":
-                            icon = "✅"
-                            color = "#28a745"
+                            status_display = "✅ GO"
                         elif status == "NO-GO":
-                            icon = "❌"
-                            color = "#dc3545"
-                        elif status == "CONDITIONAL":
-                            icon = "⚠️"
-                            color = "#ffc107"
+                            status_display = "❌ NO-GO"
+                        elif status in ["CONDITIONAL", "CONSIDER"]:
+                            status_display = "⚠️ CONDITIONAL"
                         else:
-                            icon = "❓"
-                            color = "#6c757d"
+                            status_display = f"❓ {status}"
                         
-                        st.markdown(f"""
-                        <div style="
-                            background-color: #f8f9fa;
-                            border-left: 4px solid {color};
-                            padding: 12px 15px;
-                            margin: 8px 0;
-                            border-radius: 5px;
-                        ">
-                            <strong style="font-size: 16px;">
-                                {icon} {criterion}
-                            </strong>
-                            <span style="
-                                background-color: {color};
-                                color: white;
-                                padding: 2px 10px;
-                                border-radius: 12px;
-                                font-size: 12px;
-                                font-weight: bold;
-                                margin-left: 10px;
-                            ">
-                                {status}
-                            </span>
-                            <br>
-                            <span style="color: #555; font-size: 14px;">
-                                <strong>Reason:</strong> {reason}
-                            </span>
-                            <br>
-                            <span style="color: #888; font-size: 13px;">
-                                <strong>Evidence:</strong> "{evidence}"
-                            </span>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        table_data.append({
+                            "Checklist Item": item.get('item', 'Unknown'),
+                            "Decision": status_display,
+                            "Reason": item.get('reason', ''),
+                            "Evidence from RFP": item.get('evidence', '')
+                        })
+                    
+                    st.table(table_data)
+                    st.markdown("---")
+                
+                # Final summary
+                total_go = go_no_go.get('go_count', 0)
+                total_no_go = go_no_go.get('no_go_count', 0)
+                total_conditional = go_no_go.get('conditional_count', 0)
+                
+                if total_no_go == 0 and total_go > 0:
+                    st.success(f"✅ **GO Decision!** All {total_go} items passed. We should bid on this RFP.")
+                elif total_no_go > 0:
+                    st.error(f"❌ **NO-GO Decision!** {total_no_go} items failed. We should NOT bid on this RFP.")
+                else:
+                    st.warning(f"⚠️ **CONDITIONAL Decision!** {total_conditional} items need review. Proceed with caution.")
+            
+            else:
+                st.warning("⚠️ No checklist items were analyzed. Please try again.")
         
         # ============================================================
         # EXISTING RESULTS
