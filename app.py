@@ -19,12 +19,12 @@ def main():
     st.markdown("---")
     
     st.markdown("""
-    ### 🤖 AI-Powered RFP Analysis with Go/No-Go Decision
-    Upload your RFP document and the AI will automatically extract:
+    ### 🤖 AI-Powered RFP Analysis with Company Checklist
+    Upload your RFP document and the AI will automatically evaluate it against our company checklist:
     - **📦 Deliverables** - What needs to be provided
     - **📊 Evaluation Criteria** - How your proposal will be judged
     - **✅ Compliance Checklist** - Department-specific tasks
-    - **🎯 Go/No-Go Decision** - Should you bid?
+    - **🎯 Go/No-Go Decision** - Strictly based on company checklist
     """)
     
     # Sidebar for API Key
@@ -48,8 +48,7 @@ def main():
         ### 📌 Instructions
         1. Upload your RFP document (PDF, DOCX, or TXT)
         2. Click "Process Document"
-        3. View extracted information
-        4. Get Go/No-Go recommendation
+        3. View Go/No-Go decision with detailed breakdown
         """)
         
         st.info("🤖 Using Google Gemini AI")
@@ -85,8 +84,6 @@ def main():
                 with st.spinner("Processing document with Gemini..."):
                     text = processor.extract_text(file_path)
                     results = processor.analyze_rfp(text)
-                    
-                    # NEW: Add Go/No-Go analysis
                     go_no_go = processor.go_no_go_analysis(text)
                     results['go_no_go'] = go_no_go
                     
@@ -113,61 +110,160 @@ def main():
             return
         
         # ============================================================
-        # 🎯 NEW: Go/No-Go Decision Section
+        # 🎯 GO/NO-GO DECISION DASHBOARD
         # ============================================================
+        
         st.markdown("---")
-        st.subheader("🎯 Go/No-Go Decision")
+        st.subheader("🎯 Go/No-Go Decision Dashboard")
         
         go_no_go = results.get('go_no_go', {})
         
         if go_no_go:
-            # Display the decision with color
-            decision = go_no_go.get('decision', 'No Decision')
-            score = go_no_go.get('score', 0)
+            decision = go_no_go.get('overall_decision', 'NO DECISION')
+            score = go_no_go.get('overall_score', 0)
             
+            # Determine colors and icons
             if decision == "GO":
-                st.success(f"✅ RECOMMENDATION: **GO** (Score: {score}/100)")
-                st.info("This opportunity looks promising! Consider bidding.")
+                bg_color = "#d4edda"
+                border_color = "#28a745"
+                emoji = "✅"
+                title = "GO"
+                subtitle = "We Should Bid!"
             elif decision == "NO-GO":
-                st.error(f"❌ RECOMMENDATION: **NO-GO** (Score: {score}/100)")
-                st.warning("This opportunity has risks. Consider passing.")
+                bg_color = "#f8d7da"
+                border_color = "#dc3545"
+                emoji = "❌"
+                title = "NO-GO"
+                subtitle = "We Should Not Bid"
+            elif decision == "CONDITIONAL":
+                bg_color = "#fff3cd"
+                border_color = "#ffc107"
+                emoji = "⚠️"
+                title = "CONDITIONAL"
+                subtitle = "Proceed with Conditions"
             else:
-                st.warning(f"⚠️ RECOMMENDATION: **{decision}** (Score: {score}/100)")
+                bg_color = "#e2e3e5"
+                border_color = "#6c757d"
+                emoji = "❓"
+                title = "UNDECIDED"
+                subtitle = "Needs Further Review"
             
-            # Show the breakdown
-            st.markdown("### 📊 Decision Breakdown")
+            # Big Decision Box
+            st.markdown(f"""
+            <div style="
+                background-color: {bg_color};
+                border: 4px solid {border_color};
+                border-radius: 15px;
+                padding: 30px;
+                text-align: center;
+                margin: 20px 0;
+            ">
+                <h1 style="font-size: 60px; margin: 0;">{emoji}</h1>
+                <h1 style="font-size: 48px; margin: 10px 0; color: {border_color};">
+                    {title}
+                </h1>
+                <h2 style="font-size: 24px; margin: 0; color: #333;">
+                    {subtitle}
+                </h2>
+                <div style="
+                    font-size: 28px;
+                    font-weight: bold;
+                    margin: 15px 0;
+                    color: {border_color};
+                ">
+                    Score: {score}/100
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             
-            col1, col2 = st.columns(2)
+            # Progress Bar for Score
+            st.markdown("### 📊 Overall Score")
+            st.progress(score / 100)
             
+            # Summary
+            st.markdown("### 📝 Recommendation Summary")
+            st.info(go_no_go.get('recommendation', 'No summary available'))
+            
+            # ============================================================
+            # DETAILED CHECKLIST RESULTS
+            # ============================================================
+            
+            st.markdown("---")
+            st.markdown("### 📋 Detailed Checklist Evaluation")
+            
+            checklist_results = go_no_go.get('checklist_results', {})
+            
+            # Summary Stats
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.markdown("**✅ Strengths**")
-                strengths = go_no_go.get('strengths', [])
-                if strengths:
-                    for s in strengths:
-                        st.write(f"- {s}")
-                else:
-                    st.write("- No strengths identified")
-            
+                st.metric("✅ GO Items", len(go_no_go.get('go_items', [])))
             with col2:
-                st.markdown("**⚠️ Risks/Weaknesses**")
-                risks = go_no_go.get('risks', [])
-                if risks:
-                    for r in risks:
-                        st.write(f"- {r}")
-                else:
-                    st.write("- No risks identified")
+                st.metric("❌ NO-GO Items", len(go_no_go.get('no_go_items', [])))
+            with col3:
+                st.metric("⚠️ Conditional", len(go_no_go.get('conditional_items', [])))
             
-            # Show criteria breakdown
-            st.markdown("### 📋 Evaluation Criteria")
-            criteria = go_no_go.get('criteria', {})
-            if criteria:
-                for criterion, details in criteria.items():
-                    status = "✅" if details.get('passed', False) else "❌"
-                    st.write(f"{status} **{criterion}**: {details.get('score', 0)}/10 - {details.get('explanation', '')}")
+            st.markdown("---")
+            
+            # Display each department's checklist
+            if checklist_results:
+                for dept, criteria in checklist_results.items():
+                    st.markdown(f"### 🏢 {dept} Department")
+                    
+                    for criterion, details in criteria.items():
+                        status = details.get('status', 'UNKNOWN')
+                        reason = details.get('reason', '')
+                        evidence = details.get('evidence', '')
+                        
+                        if status == "GO":
+                            icon = "✅"
+                            color = "#28a745"
+                        elif status == "NO-GO":
+                            icon = "❌"
+                            color = "#dc3545"
+                        elif status == "CONDITIONAL":
+                            icon = "⚠️"
+                            color = "#ffc107"
+                        else:
+                            icon = "❓"
+                            color = "#6c757d"
+                        
+                        st.markdown(f"""
+                        <div style="
+                            background-color: #f8f9fa;
+                            border-left: 4px solid {color};
+                            padding: 12px 15px;
+                            margin: 8px 0;
+                            border-radius: 5px;
+                        ">
+                            <strong style="font-size: 16px;">
+                                {icon} {criterion}
+                            </strong>
+                            <span style="
+                                background-color: {color};
+                                color: white;
+                                padding: 2px 10px;
+                                border-radius: 12px;
+                                font-size: 12px;
+                                font-weight: bold;
+                                margin-left: 10px;
+                            ">
+                                {status}
+                            </span>
+                            <br>
+                            <span style="color: #555; font-size: 14px;">
+                                <strong>Reason:</strong> {reason}
+                            </span>
+                            <br>
+                            <span style="color: #888; font-size: 13px;">
+                                <strong>Evidence:</strong> "{evidence}"
+                            </span>
+                        </div>
+                        """, unsafe_allow_html=True)
         
         # ============================================================
-        # Existing Results
+        # EXISTING RESULTS
         # ============================================================
+        
         st.markdown("---")
         st.subheader("📋 Project Summary")
         st.info(results.get('project_summary', 'No summary available'))
