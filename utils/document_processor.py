@@ -124,65 +124,146 @@ class RFPProcessor:
             }
     
     def go_no_go_analysis(self, text: str) -> Dict[str, Any]:
-        """Perform Go/No-Go analysis based on company checklist"""
+        """Perform Go/No-Go analysis based on company checklist - WITH NUMERIC EXTRACTION"""
         
         prompt = f"""
         You are a Bid/No-Bid decision expert. Analyze this RFP against our company checklist.
         
+        **CRITICAL: You MUST read and extract ALL numeric values (payment terms, dollar amounts, dates, deadlines) from the RFP text.**
+        
         RFP TEXT:
-        {text[:8000]}
+        {text[:10000]}
         
         ========================================
         COMPANY CHECKLIST - Evaluate Each Item
         ========================================
         
-        FINANCIAL CHECKLIST:
-        1. "Payment Terms" - Are payment terms NET30 or better? GO if yes, NO-GO if worse
-        2. "Insurance Requirements" - Is insurance required $5M or less? GO if yes, NO-GO if more
-        3. "Financial Stability" - Are audited financial statements required? 
-        4. "Profitability" - Can we make profit on this?
-        5. "Bid Bond" - Is a bid bond required? Can we provide it?
+        FINANCIAL CHECKLIST (Score each 0-10):
+        1. "Payment Terms" - SEARCH for: "NET30", "NET 30", "30 days", "payment terms"
+           - NET30 or better = 10
+           - NET45 = 7
+           - NET60 = 4
+           - Not mentioned = 3 (ESCALATE - need to ask client)
         
-        LEGAL CHECKLIST:
-        6. "Eligibility Criteria" - Do we meet experience requirements?
-        7. "State Registration" - Is state registration required?
-        8. "E-Verify" - Is E-Verify required?
-        9. "Contract Terms" - Are terms acceptable?
-        10. "Legal Compliance" - Does it comply with laws?
+        2. "Insurance Requirements" - SEARCH for: "$", "million", "M", "coverage", "liability"
+           - $5M or less = 10
+           - $10M = 5
+           - More than $10M = 0
+           - Not mentioned = 3 (ESCALATE - need to ask client)
         
-        OPERATIONS CHECKLIST:
-        11. "Required Forms" - Can we complete all forms?
-        12. "Submission Deadlines" - Can we meet deadlines?
-        13. "Signatory Authority" - Do we have the right person?
-        14. "Vendor Registration" - Can we register?
+        3. "Financial Stability" - SEARCH for: "audited", "financial statements", "balance sheet"
+           - Required and we have = 10
+           - Required but we don't have = 0
+           - Not mentioned = 7
         
-        TECHNICAL CHECKLIST:
-        15. "Scope Alignment" - Matches our services (IAM, cybersecurity)?
-        16. "Technical Requirements" - Can we meet specs?
-        17. "Industry Standards" - Complies with standards?
-        18. "Security Requirements" - Can we meet security needs?
-        19. "Integration Needs" - Can we integrate?
+        4. "Profitability" - SEARCH for: "budget", "estimated value", "contract value", "$"
+           - Clear budget/profit opportunity = 10
+           - Vague budget = 5
+           - No budget mentioned = 3 (ESCALATE - need budget info)
+        
+        5. "Bid Bond" - SEARCH for: "bid bond", "bond", "surety"
+           - Not required = 10
+           - Required and we can provide = 7
+           - Required and we can't = 0
+        
+        LEGAL CHECKLIST (Score each 0-10):
+        6. "Eligibility Criteria" - SEARCH for: "experience", "years", "qualifications"
+           - We meet all = 10
+           - Meet most = 7
+           - Don't meet = 0
+        
+        7. "State Registration" - SEARCH for: "registered in", "license", "authorized to do business"
+           - Not required = 10
+           - Required and we have = 7
+           - Required and we don't = 0
+        
+        8. "E-Verify" - SEARCH for: "E-Verify", "e-verify", "employment verification"
+           - Not required = 10
+           - Required and we have = 7
+           - Required and we don't = 0
+        
+        9. "Contract Terms" - SEARCH for: "contract", "terms", "conditions", "liability", "indemnification"
+           - Acceptable = 10
+           - Need minor review = 7
+           - Major issues = 3 (ESCALATE - legal review needed)
+           - Not attached = 3 (ESCALATE - need to request contract)
+        
+        10. "Legal Compliance" - SEARCH for: "comply", "regulations", "laws", "data protection"
+            - We comply = 10
+            - Mostly comply = 7
+            - Don't comply = 0
+        
+        OPERATIONS CHECKLIST (Score each 0-10):
+        11. "Required Forms" - SEARCH for: "form", "certification", "attachment", "schedule"
+            - All standard = 10
+            - Some effort = 7
+            - Extensive = 4
+        
+        12. "Submission Deadlines" - SEARCH for: "due date", "deadline", "submit by", "August", "September"
+            - Feasible (30+ days) = 10
+            - Tight (15-29 days) = 7
+            - Very tight (<15 days) = 4
+            - Not mentioned = 3 (ESCALATE - need deadline)
+        
+        13. "Signatory Authority" - SEARCH for: "sign", "authorized", "authority"
+            - Available = 10
+            - Need approval = 7
+            - Not available = 0
+        
+        14. "Vendor Registration" - SEARCH for: "register", "vendor portal", "supplier registration"
+            - Not required = 10
+            - Required and we have = 7
+            - Required and we don't = 3 (ESCALATE - need to register)
+        
+        TECHNICAL CHECKLIST (Score each 0-10):
+        15. "Scope Alignment" - SEARCH for: "services", "products", "requirements", "scope"
+            - Perfect match = 10
+            - Good fit = 7
+            - Partial = 4
+        
+        16. "Technical Requirements" - SEARCH for: "technical", "specifications", "standards", "NIST", "ISO"
+            - We meet all = 10
+            - Meet most = 7
+            - Don't meet = 0
+        
+        17. "Industry Standards" - SEARCH for: "ISO", "NIST", "standards", "compliance"
+            - We comply = 10
+            - Mostly = 7
+            - Don't = 0
+        
+        18. "Security Requirements" - SEARCH for: "security", "encryption", "access control", "cybersecurity"
+            - We meet = 10
+            - Mostly = 7
+            - Don't = 0
+        
+        19. "Integration Needs" - SEARCH for: "integrate", "integration", "API", "connect"
+            - We can do = 10
+            - With effort = 7
+            - Can't = 0
         
         ========================================
         
-        For EACH checklist item, decide:
-        - GO = We meet this requirement
-        - NO-GO = We don't meet this requirement
-        - CONDITIONAL = We can meet it with conditions
+        STATUS DEFINITIONS:
+        - "GO" = Score 7-10 (We fully meet this)
+        - "ESCALATE" = Score 3-6 (Missing info or needs management review)
+        - "NO-GO" = Score 0-2 (Cannot meet this)
         
-        Return **ONLY** valid JSON (no extra text, no markdown) in this format:
+        ESCALATE means: "We need more information or management approval before deciding."
+        
+        ========================================
+        
+        Return JSON ONLY in this format:
         {{
-            "overall_decision": "GO",
             "overall_score": 75,
             "checklist": [
-                {{"category": "Financial", "item": "Payment Terms", "status": "GO", "reason": "NET30 terms", "evidence": "Found on page 5"}},
-                {{"category": "Financial", "item": "Insurance", "status": "NO-GO", "reason": "Requires $10M", "evidence": "Section 3.2"}},
-                {{"category": "Legal", "item": "Eligibility", "status": "GO", "reason": "We have experience", "evidence": "We have 10+ years"}}
+                {{"category": "Financial", "item": "Payment Terms", "score": 10, "status": "GO", "reason": "NET30 terms found in Section 6", "evidence": "Section 6: 'NET30 payment terms'"}},
+                {{"category": "Financial", "item": "Insurance", "score": 5, "status": "ESCALATE", "reason": "$10M required, we have $5M - need to discuss", "evidence": "Section 7: '$10M liability coverage required'"}},
+                {{"category": "Operations", "item": "Submission Deadlines", "score": 10, "status": "GO", "reason": "45 days to submit", "evidence": "Header: 'PROPOSAL DUE DATE: August 15, 2026'"}}
             ],
-            "go_count": 10,
-            "no_go_count": 2,
-            "conditional_count": 1,
-            "summary": "We should bid because we meet most requirements"
+            "go_count": 12,
+            "no_go_count": 0,
+            "escalate_count": 4,
+            "summary": "We should bid, but escalate insurance and contract terms to management."
         }}
         """
         
@@ -190,52 +271,69 @@ class RFPProcessor:
             response = self.model.generate_content(prompt)
             raw_text = response.text.strip()
             
-            # Try to extract JSON from the response (in case AI added extra text)
+            # Extract JSON
             json_match = re.search(r'(\{.*\})', raw_text, re.DOTALL)
             if json_match:
                 json_str = json_match.group(1)
             else:
                 json_str = raw_text
             
-            # Clean up common JSON issues
+            # Clean up
             json_str = re.sub(r',\s*}', '}', json_str)
             json_str = re.sub(r',\s*]', ']', json_str)
             
-            # Parse JSON
             result = json.loads(json_str)
             
             # Ensure all required fields exist
             if 'checklist' not in result:
                 result['checklist'] = []
-            if 'overall_decision' not in result:
-                result['overall_decision'] = 'UNDECIDED'
             if 'overall_score' not in result:
-                result['overall_score'] = 0
+                result['overall_score'] = 50
+            
+            # Calculate actual score from checklist
+            total_score = 0
+            max_score = len(result.get('checklist', [])) * 10
+            for item in result.get('checklist', []):
+                total_score += item.get('score', 0)
+            
+            if max_score > 0:
+                calculated_score = (total_score / max_score) * 100
+                result['overall_score'] = max(calculated_score, result.get('overall_score', 0))
             
             # Enforce strict score-based decision
             score = result.get('overall_score', 0)
             if score >= 71:
                 result['overall_decision'] = 'GO'
             elif 51 <= score <= 70:
-                result['overall_decision'] = 'CONDITIONAL'
+                result['overall_decision'] = 'ESCALATE'
             else:
                 result['overall_decision'] = 'NO-GO'
+            
+            # Count statuses
+            go_count = sum(1 for item in result.get('checklist', []) if item.get('status') == 'GO')
+            no_go_count = sum(1 for item in result.get('checklist', []) if item.get('status') == 'NO-GO')
+            escalate_count = sum(1 for item in result.get('checklist', []) if item.get('status') == 'ESCALATE')
+            
+            result['go_count'] = go_count
+            result['no_go_count'] = no_go_count
+            result['escalate_count'] = escalate_count
+            result['conditional_count'] = escalate_count  # For backward compatibility
             
             return result
             
         except Exception as e:
-            # Return a fallback with sample data so the app doesn't crash
             return {
                 "overall_decision": "NEEDS REVIEW",
                 "overall_score": 50,
                 "checklist": [
-                    {"category": "Financial", "item": "Payment Terms", "status": "CONDITIONAL", "reason": "Could not analyze due to parsing error", "evidence": "Check RFP manually"},
-                    {"category": "Legal", "item": "Eligibility", "status": "CONDITIONAL", "reason": "Could not analyze due to parsing error", "evidence": "Check RFP manually"},
-                    {"category": "Operations", "item": "Deadlines", "status": "CONDITIONAL", "reason": "Could not analyze due to parsing error", "evidence": "Check RFP manually"},
-                    {"category": "Technical", "item": "Scope", "status": "CONDITIONAL", "reason": "Could not analyze due to parsing error", "evidence": "Check RFP manually"}
+                    {"category": "Financial", "item": "Payment Terms", "score": 5, "status": "ESCALATE", "reason": "Could not analyze", "evidence": "Check RFP manually"},
+                    {"category": "Legal", "item": "Eligibility", "score": 5, "status": "ESCALATE", "reason": "Could not analyze", "evidence": "Check RFP manually"},
+                    {"category": "Operations", "item": "Deadlines", "score": 5, "status": "ESCALATE", "reason": "Could not analyze", "evidence": "Check RFP manually"},
+                    {"category": "Technical", "item": "Scope", "score": 5, "status": "ESCALATE", "reason": "Could not analyze", "evidence": "Check RFP manually"}
                 ],
                 "go_count": 0,
                 "no_go_count": 0,
+                "escalate_count": 4,
                 "conditional_count": 4,
                 "summary": f"AI analysis encountered an error: {str(e)}. Please review the RFP manually."
             }
