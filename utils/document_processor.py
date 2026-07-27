@@ -4,7 +4,7 @@ import docx
 import os
 import json
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 class RFPProcessor:
     """Handles document extraction and AI analysis for RFP documents"""
@@ -30,10 +30,45 @@ class RFPProcessor:
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+            
+            if len(text.strip()) < 200:
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(file_path) as pdf:
+                        for page in pdf.pages:
+                            page_text = page.extract_text()
+                            if page_text:
+                                text += page_text + "\n"
+                except ImportError:
+                    pass
+            
+            if not text or len(text.strip()) < 50:
+                raise Exception("No text could be extracted from PDF.")
+            
+            text = self._clean_extracted_text(text)
             return text
+            
         except Exception as e:
             raise Exception(f"Error reading PDF: {str(e)}")
+    
+    def _clean_extracted_text(self, text: str) -> str:
+        if not text:
+            return text
+        
+        text = re.sub(r'\n\s*\d+\s*\n', '\n', text)
+        text = re.sub(r'Page \d+', '', text)
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        text = re.sub(r'[^\w\s\.\,\-\$\d\%]', ' ', text)
+        text = re.sub(r'\$ (\d+)', r'$\1', text)
+        text = re.sub(r'(\d+) \%', r'\1%', text)
+        text = re.sub(r'(\d+) M', r'\1M', text)
+        text = re.sub(r'(\d+) K', r'\1K', text)
+        
+        return text
     
     def extract_text_from_docx(self, file_path: str) -> str:
         try:
@@ -68,31 +103,59 @@ class RFPProcessor:
         prompt = f"""
         You are an expert in analyzing Request for Proposal (RFP) documents.
         
-        Analyze the following RFP text and extract specific information in JSON format.
+        The text below contains content from MULTIPLE FILES. Each file is clearly marked with:
+        "========================================"
+        "FILE: [filename]"
+        "========================================"
+        
+        **CRITICAL INSTRUCTION: For EVERY deliverable you identify, you MUST include the EXACT filename where it appears.**
+        
+        Look at the "FILE: [filename]" headers above each section of text to determine which file each deliverable came from.
+        
+        Total RFP text length: {len(text)} characters.
         
         RFP TEXT:
-        {text[:10000]}
+        {text}
         
-        Extract the following information and format as JSON:
+        Extract the following information:
         
         1. "project_summary": A brief 2-3 sentence summary of the project
-        2. "deliverables": List of specific items, products, or services that need to be provided
-        3. "evaluation_criteria": List of criteria the client will use to judge proposals
+        
+        2. "deliverables": Group deliverables into BUSINESS CATEGORIES (max 5-6 categories, max 5-6 items per category).
+           For EACH deliverable, include:
+           - "name": The deliverable name
+           - "section_ref": The section number where it appears (e.g., "Section XI.B.1", "Article IV", "Section 3.2")
+           - "reason": Why this deliverable is required (include the section reference)
+           - "source_file": The EXACT filename where this deliverable was found (e.g., "doc1.txt", "ODU_RFP_Part1.txt")
+        
+        3. "evaluation_criteria": List of criteria the client will use to judge proposals (flat list)
+        
         4. "compliance_checklist": An object with departments as keys and lists of tasks as values
            Departments: Legal, Accounting, Technical, Operations, HR
         
-        Return ONLY valid JSON in this exact format:
+        Return ONLY valid JSON. DO NOT include any text outside the JSON.
+        
+        Example format:
         {{
-            "project_summary": "summary text",
-            "deliverables": ["deliverable 1", "deliverable 2"],
-            "evaluation_criteria": ["criterion 1", "criterion 2"],
-            "compliance_checklist": {{
-                "Legal": ["task 1", "task 2"],
-                "Accounting": ["task 1", "task 2"],
-                "Technical": ["task 1", "task 2"],
-                "Operations": ["task 1", "task 2"],
-                "HR": ["task 1", "task 2"]
-            }}
+            "project_summary": "Old Dominion University is seeking an AI-driven search solution...",
+            "deliverables": [
+                {{
+                    "category": "Documentation & Forms",
+                    "items": [
+                        {{"name": "RFP Cover Sheet", "section_ref": "Section XI.B.1", "reason": "Requires the return of the RFP cover sheet", "source_file": "doc1.txt"}},
+                        {{"name": "W-9 Form", "section_ref": "Section XI.B.2", "reason": "Requires a completed Substitute W-9 Form", "source_file": "doc2.txt"}},
+                        {{"name": "SWAM Plan", "section_ref": "Attachment D", "reason": "Requires Contractor's Proposed SWAM Plan", "source_file": "doc3.txt"}}
+                    ]
+                }},
+                {{
+                    "category": "Technical Requirements",
+                    "items": [
+                        {{"name": "IAM Software", "section_ref": "Section IV", "reason": "Requires IAM solution deployment", "source_file": "doc1.txt"}}
+                    ]
+                }}
+            ],
+            "evaluation_criteria": ["Experience", "Capability"],
+            "compliance_checklist": {{"Legal": ["NDA"], "Accounting": ["Insurance"]}}
         }}
         """
         
@@ -106,12 +169,38 @@ class RFPProcessor:
                 json_str = json_str.split("```")[1].split("```")[0].strip()
             
             result = json.loads(json_str)
+            
+            # Ensure deliverables is in the new format with source_file
+            if 'deliverables' in result:
+                if isinstance(result['deliverables'], list) and len(result['deliverables']) > 0:
+                    # If flat list (old format), convert
+                    if isinstance(result['deliverables'][0], str):
+                        flat_list = [{"name": item, "section_ref": "N/A", "reason": "Required by RFP", "source_file": "Unknown"} for item in result['deliverables']]
+                        result['deliverables'] = [{"category": "General", "items": flat_list}]
+                    # If old format without section_ref or source_file
+                    elif isinstance(result['deliverables'][0], dict) and 'items' in result['deliverables'][0]:
+                        for cat in result['deliverables']:
+                            if 'items' in cat:
+                                if len(cat['items']) > 0 and isinstance(cat['items'][0], str):
+                                    cat['items'] = [{"name": item, "section_ref": "N/A", "reason": "Required by RFP", "source_file": "Unknown"} for item in cat['items']]
+                                elif isinstance(cat['items'][0], dict) and 'name' in cat['items'][0]:
+                                    # Ensure each item has section_ref, reason, and source_file
+                                    for item in cat['items']:
+                                        if 'section_ref' not in item:
+                                            item['section_ref'] = 'N/A'
+                                        if 'reason' not in item:
+                                            item['reason'] = 'Required by RFP'
+                                        if 'source_file' not in item:
+                                            item['source_file'] = 'Unknown'
+                else:
+                    result['deliverables'] = []
+            
             return result
             
         except Exception as e:
             return {
                 "project_summary": "Error processing document",
-                "deliverables": ["Unable to extract deliverables"],
+                "deliverables": [],
                 "evaluation_criteria": ["Unable to extract evaluation criteria"],
                 "compliance_checklist": {
                     "Legal": ["Unable to extract compliance tasks"],
@@ -131,115 +220,41 @@ class RFPProcessor:
         
         **CRITICAL: You MUST read and extract ALL numeric values (payment terms, dollar amounts, dates, deadlines) from the RFP text.**
         
-        RFP TEXT:
-        {text[:10000]}
+        Total RFP text length: {len(text)} characters.
+        
+        RFP TEXT (FULL DOCUMENT):
+        {text}
         
         ========================================
         COMPANY CHECKLIST - Evaluate Each Item
         ========================================
         
         FINANCIAL CHECKLIST (Score each 0-10):
-        1. "Payment Terms" - SEARCH for: "NET30", "NET 30", "30 days", "payment terms"
-           - NET30 or better = 10
-           - NET45 = 7
-           - NET60 = 4
-           - Not mentioned = 3 (ESCALATE - need to ask client)
-        
-        2. "Insurance Requirements" - SEARCH for: "$", "million", "M", "coverage", "liability"
-           - $5M or less = 10
-           - $10M = 5
-           - More than $10M = 0
-           - Not mentioned = 3 (ESCALATE - need to ask client)
-        
-        3. "Financial Stability" - SEARCH for: "audited", "financial statements", "balance sheet"
-           - Required and we have = 10
-           - Required but we don't have = 0
-           - Not mentioned = 7
-        
-        4. "Profitability" - SEARCH for: "budget", "estimated value", "contract value", "$"
-           - Clear budget/profit opportunity = 10
-           - Vague budget = 5
-           - No budget mentioned = 3 (ESCALATE - need budget info)
-        
-        5. "Bid Bond" - SEARCH for: "bid bond", "bond", "surety"
-           - Not required = 10
-           - Required and we can provide = 7
-           - Required and we can't = 0
+        1. "Payment Terms" - NET30 or better = 10, NET45 = 7, NET60 = 4, Not mentioned = 3
+        2. "Insurance Requirements" - $5M or less = 10, $10M = 5, More = 0, Not mentioned = 3
+        3. "Financial Stability" - We meet = 10, Partial = 7, Don't meet = 0
+        4. "Profitability" - Budget known = 10, Vague = 5, Not mentioned = 3
+        5. "Bid Bond" - Not required = 10, Can provide = 7, Can't = 0
         
         LEGAL CHECKLIST (Score each 0-10):
-        6. "Eligibility Criteria" - SEARCH for: "experience", "years", "qualifications"
-           - We meet all = 10
-           - Meet most = 7
-           - Don't meet = 0
-        
-        7. "State Registration" - SEARCH for: "registered in", "license", "authorized to do business"
-           - Not required = 10
-           - Required and we have = 7
-           - Required and we don't = 0
-        
-        8. "E-Verify" - SEARCH for: "E-Verify", "e-verify", "employment verification"
-           - Not required = 10
-           - Required and we have = 7
-           - Required and we don't = 0
-        
-        9. "Contract Terms" - SEARCH for: "contract", "terms", "conditions", "liability", "indemnification"
-           - Acceptable = 10
-           - Need minor review = 7
-           - Major issues = 3 (ESCALATE - legal review needed)
-           - Not attached = 3 (ESCALATE - need to request contract)
-        
-        10. "Legal Compliance" - SEARCH for: "comply", "regulations", "laws", "data protection"
-            - We comply = 10
-            - Mostly comply = 7
-            - Don't comply = 0
+        6. "Eligibility Criteria" - Meet all = 10, Meet most = 7, Don't meet = 0
+        7. "State Registration" - Not required = 10, Have it = 7, Don't have = 0
+        8. "E-Verify" - Not required = 10, Have it = 7, Don't have = 0
+        9. "Contract Terms" - Acceptable = 10, Review needed = 7, Major issues = 3
+        10. "Legal Compliance" - Comply = 10, Mostly = 7, Don't = 0
         
         OPERATIONS CHECKLIST (Score each 0-10):
-        11. "Required Forms" - SEARCH for: "form", "certification", "attachment", "schedule"
-            - All standard = 10
-            - Some effort = 7
-            - Extensive = 4
-        
-        12. "Submission Deadlines" - SEARCH for: "due date", "deadline", "submit by", "August", "September"
-            - Feasible (30+ days) = 10
-            - Tight (15-29 days) = 7
-            - Very tight (<15 days) = 4
-            - Not mentioned = 3 (ESCALATE - need deadline)
-        
-        13. "Signatory Authority" - SEARCH for: "sign", "authorized", "authority"
-            - Available = 10
-            - Need approval = 7
-            - Not available = 0
-        
-        14. "Vendor Registration" - SEARCH for: "register", "vendor portal", "supplier registration"
-            - Not required = 10
-            - Required and we have = 7
-            - Required and we don't = 3 (ESCALATE - need to register)
+        11. "Required Forms" - All standard = 10, Some effort = 7, Extensive = 4
+        12. "Submission Deadlines" - Feasible (30+ days) = 10, Tight (15-29 days) = 7, Very tight (<15 days) = 4
+        13. "Signatory Authority" - Available = 10, Need approval = 7, Not available = 0
+        14. "Vendor Registration" - Not required = 10, Have it = 7, Need to register = 3
         
         TECHNICAL CHECKLIST (Score each 0-10):
-        15. "Scope Alignment" - SEARCH for: "services", "products", "requirements", "scope"
-            - Perfect match = 10
-            - Good fit = 7
-            - Partial = 4
-        
-        16. "Technical Requirements" - SEARCH for: "technical", "specifications", "standards", "NIST", "ISO"
-            - We meet all = 10
-            - Meet most = 7
-            - Don't meet = 0
-        
-        17. "Industry Standards" - SEARCH for: "ISO", "NIST", "standards", "compliance"
-            - We comply = 10
-            - Mostly = 7
-            - Don't = 0
-        
-        18. "Security Requirements" - SEARCH for: "security", "encryption", "access control", "cybersecurity"
-            - We meet = 10
-            - Mostly = 7
-            - Don't = 0
-        
-        19. "Integration Needs" - SEARCH for: "integrate", "integration", "API", "connect"
-            - We can do = 10
-            - With effort = 7
-            - Can't = 0
+        15. "Scope Alignment" - Perfect = 10, Good fit = 7, Partial = 4
+        16. "Technical Requirements" - Meet all = 10, Meet most = 7, Don't meet = 0
+        17. "Industry Standards" - Comply = 10, Mostly = 7, Don't = 0
+        18. "Security Requirements" - Meet = 10, Mostly = 7, Don't = 0
+        19. "Integration Needs" - Can do = 10, With effort = 7, Can't = 0
         
         ========================================
         
@@ -248,23 +263,19 @@ class RFPProcessor:
         - "ESCALATE" = Score 3-6 (Missing info or needs management review)
         - "NO-GO" = Score 0-2 (Cannot meet this)
         
-        ESCALATE means: "We need more information or management approval before deciding."
-        
-        ========================================
-        
         Return JSON ONLY in this format:
         {{
-            "overall_score": 75,
             "checklist": [
-                {{"category": "Financial", "item": "Payment Terms", "score": 10, "status": "GO", "reason": "NET30 terms found in Section 6", "evidence": "Section 6: 'NET30 payment terms'"}},
-                {{"category": "Financial", "item": "Insurance", "score": 5, "status": "ESCALATE", "reason": "$10M required, we have $5M - need to discuss", "evidence": "Section 7: '$10M liability coverage required'"}},
-                {{"category": "Operations", "item": "Submission Deadlines", "score": 10, "status": "GO", "reason": "45 days to submit", "evidence": "Header: 'PROPOSAL DUE DATE: August 15, 2026'"}}
+                {{"category": "Financial", "item": "Payment Terms", "score": 10, "status": "GO", "reason": "NET30 terms found", "evidence": "Section 1: NET30"}},
+                {{"category": "Financial", "item": "Insurance", "score": 5, "status": "ESCALATE", "reason": "$10M required, we have $5M", "evidence": "Section 2: $10M"}}
             ],
-            "go_count": 12,
+            "go_count": 10,
             "no_go_count": 0,
-            "escalate_count": 4,
-            "summary": "We should bid, but escalate insurance and contract terms to management."
+            "escalate_count": 2,
+            "summary": "We should bid with escalation items"
         }}
+        
+        IMPORTANT: DO NOT include "overall_score" in your JSON. The score will be calculated automatically from the checklist scores.
         """
         
         try:
@@ -287,18 +298,21 @@ class RFPProcessor:
             # Ensure all required fields exist
             if 'checklist' not in result:
                 result['checklist'] = []
-            if 'overall_score' not in result:
-                result['overall_score'] = 50
             
-            # Calculate actual score from checklist
+            # ============================================================
+            # ✅ CALCULATE SCORE ONLY FROM CHECKLIST ITEMS
+            # ============================================================
             total_score = 0
             max_score = len(result.get('checklist', [])) * 10
+            
             for item in result.get('checklist', []):
                 total_score += item.get('score', 0)
             
             if max_score > 0:
                 calculated_score = (total_score / max_score) * 100
-                result['overall_score'] = max(calculated_score, result.get('overall_score', 0))
+                result['overall_score'] = round(min(100, calculated_score))
+            else:
+                result['overall_score'] = 50
             
             # Enforce strict score-based decision
             score = result.get('overall_score', 0)
@@ -317,7 +331,7 @@ class RFPProcessor:
             result['go_count'] = go_count
             result['no_go_count'] = no_go_count
             result['escalate_count'] = escalate_count
-            result['conditional_count'] = escalate_count  # For backward compatibility
+            result['conditional_count'] = escalate_count
             
             return result
             
