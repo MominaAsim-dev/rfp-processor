@@ -1,10 +1,12 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import json
 import tempfile
 import base64
 import re
 import uuid
+import urllib.parse
 from dotenv import load_dotenv
 from utils.document_processor import RFPProcessor
 from datetime import datetime
@@ -24,26 +26,22 @@ st.set_page_config(
 )
 
 # ============================================================
-# 🆕 TWO-STEP PIPELINE: Storage Functions
+# STORAGE FUNCTIONS
 # ============================================================
 RESULTS_DIR = "analysis_results"
 
 def ensure_results_dir():
-    """Create the results directory if it doesn't exist."""
     if not os.path.exists(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
 
 def generate_analysis_id():
-    """Generate a unique Analysis ID."""
     date_str = datetime.now().strftime("%Y%m%d")
     uid = str(uuid.uuid4())[:8]
     return f"RFP-{date_str}-{uid}"
 
 def save_analysis_results(analysis_id, results):
-    """Save the analysis results as JSON file."""
     ensure_results_dir()
     filepath = os.path.join(RESULTS_DIR, f"{analysis_id}.json")
-    # Create a copy of results with metadata
     results_to_save = results.copy()
     results_to_save['_metadata'] = {
         'analysis_id': analysis_id,
@@ -54,7 +52,6 @@ def save_analysis_results(analysis_id, results):
         json.dump(results_to_save, f, indent=2, ensure_ascii=False)
 
 def load_analysis_results(analysis_id):
-    """Load analysis results by ID."""
     filepath = os.path.join(RESULTS_DIR, f"{analysis_id}.json")
     if not os.path.exists(filepath):
         return None
@@ -62,32 +59,186 @@ def load_analysis_results(analysis_id):
         return json.load(f)
 
 def get_all_analysis_ids():
-    """Return a list of all stored analysis IDs."""
     ensure_results_dir()
     files = os.listdir(RESULTS_DIR)
-    ids = [f.replace('.json', '') for f in files if f.endswith('.json')]
-    return ids
+    return [f.replace('.json', '') for f in files if f.endswith('.json')]
 
 # ============================================================
-# RENDER FUNCTIONS (unchanged)
+# ✅ EMBEDDED PDF.js VIEWER — real cross-browser search + highlight
 # ============================================================
-def render_deliverables(deliverables, file_bytes=None, file_type=None, file_name=None):
-    """Render deliverables with clean formatting - NO HTML in section_ref"""
+def build_pdf_viewer_html(pdf_base64, search_text="", page_hint=None):
+    """
+    Renders the PDF entirely client-side using PDF.js, walks every page's
+    real text layer, finds the closest match to `search_text`, highlights it,
+    and auto-scrolls to that page. Works in Chrome/Edge/Firefox/Safari alike
+    (unlike the old data-URI '#search=' hash, which only Firefox's native
+    viewer understands) and has no page-count limit since it just iterates
+    pdf.numPages.
+    """
+    search_js = json.dumps(search_text or "")
+
+    page_hint_val = "null"
+    if page_hint not in (None, "N/A", ""):
+        m = re.search(r'\d+', str(page_hint))
+        if m:
+            page_hint_val = m.group()
+
+    html = f"""
+    <div id="pdfToolbar" style="background:#2d2d5e;color:#eee;padding:8px 14px;
+         border-radius:8px 8px 0 0;font-family:sans-serif;font-size:13px;">
+      📄 <span id="matchStatus">Loading PDF…</span>
+    </div>
+    <div id="viewerContainer" style="height:750px;overflow-y:auto;background:#525659;
+         border-radius:0 0 8px 8px;">
+      <div id="pdfPages" style="display:flex;flex-direction:column;align-items:center;padding:15px 0;"></div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+    (function() {{
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+      function b64toUint8Array(b64) {{
+        const raw = atob(b64);
+        const arr = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+        return arr;
+      }}
+
+      function normalize(s) {{
+        return s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();
+      }}
+
+      const pdfBytes = b64toUint8Array("{pdf_base64}");
+      const searchTextRaw = {search_js};
+      const pageHint = {page_hint_val};
+
+      const normSearchFull = normalize(searchTextRaw);
+      // Use first ~12 words: long quotes rarely survive PDF text-extraction
+      // formatting (line wraps, hyphenation) verbatim, so match on a
+      // shorter, more robust prefix instead of the full sentence.
+      const normSearch = normSearchFull.split(' ').filter(Boolean).slice(0, 12).join(' ');
+
+      const statusEl = document.getElementById('matchStatus');
+
+      pdfjsLib.getDocument({{ data: pdfBytes }}).promise.then(async function(pdf) {{
+        const container = document.getElementById('pdfPages');
+        let matchedPage = null;
+
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {{
+          const page = await pdf.getPage(pageNum);
+          const viewport = page.getViewport({{ scale: 1.4 }});
+
+          const pageWrap = document.createElement('div');
+          pageWrap.id = 'page-' + pageNum;
+          pageWrap.style.position = 'relative';
+          pageWrap.style.width = viewport.width + 'px';
+          pageWrap.style.height = viewport.height + 'px';
+          pageWrap.style.marginBottom = '15px';
+          pageWrap.style.boxShadow = '0 2px 10px rgba(0,0,0,0.45)';
+          container.appendChild(pageWrap);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          pageWrap.appendChild(canvas);
+          const ctx = canvas.getContext('2d');
+          await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+
+          const textContent = await page.getTextContent();
+          const textLayerDiv = document.createElement('div');
+          textLayerDiv.style.position = 'absolute';
+          textLayerDiv.style.top = '0';
+          textLayerDiv.style.left = '0';
+          textLayerDiv.style.width = viewport.width + 'px';
+          textLayerDiv.style.height = viewport.height + 'px';
+          pageWrap.appendChild(textLayerDiv);
+
+          let pageTextNorm = '';
+          const spanInfos = [];
+
+          textContent.items.forEach(function(item) {{
+            const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+            const fontHeight = Math.hypot(tx[2], tx[3]);
+            const span = document.createElement('span');
+            span.textContent = item.str;
+            span.style.position = 'absolute';
+            span.style.left = tx[4] + 'px';
+            span.style.top = (tx[5] - fontHeight) + 'px';
+            span.style.fontSize = fontHeight + 'px';
+            span.style.color = 'transparent';
+            span.style.whiteSpace = 'pre';
+            textLayerDiv.appendChild(span);
+
+            const norm = item.str.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ');
+            const startOffset = pageTextNorm.length;
+            pageTextNorm += norm + ' ';
+            spanInfos.push({{ span: span, start: startOffset, end: startOffset + norm.length }});
+          }});
+
+          if (normSearch && matchedPage === null) {{
+            const idx = pageTextNorm.indexOf(normSearch);
+            if (idx !== -1) {{
+              matchedPage = pageNum;
+              const endIdx = idx + normSearch.length;
+              spanInfos.forEach(function(info) {{
+                if (info.end > idx && info.start < endIdx) {{
+                  info.span.style.background = 'rgba(255,213,79,0.65)';
+                  info.span.style.borderRadius = '2px';
+                }}
+              }});
+            }}
+          }}
+        }}
+
+        const scrollTargetPage = matchedPage || pageHint || 1;
+
+        if (matchedPage) {{
+          statusEl.textContent = 'Match highlighted on page ' + matchedPage + ' ✅';
+          statusEl.style.color = '#8bc34a';
+        }} else if (normSearch) {{
+          statusEl.textContent = 'Exact wording not found — jumped to page ' + scrollTargetPage + ' (try opening the full PDF to confirm)';
+          statusEl.style.color = '#ffb74d';
+        }} else {{
+          statusEl.textContent = 'Showing page ' + scrollTargetPage;
+        }}
+
+        const targetEl = document.getElementById('page-' + scrollTargetPage);
+        if (targetEl) {{
+          setTimeout(function() {{
+            targetEl.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+          }}, 150);
+        }}
+      }}).catch(function(err) {{
+        statusEl.textContent = 'Error loading PDF: ' + err.message;
+        statusEl.style.color = '#e57373';
+      }});
+    }})();
+    </script>
+    """
+    return html
+
+# ============================================================
+# ✅ RENDER DELIVERABLES – each item gets a "🔍 View" button
+# ============================================================
+def render_deliverables(deliverables, pdf_base64=None, file_name=None):
+    """Render deliverables; each item has a View button that opens the
+    embedded PDF.js viewer scrolled + highlighted to its exact source line."""
     if not deliverables:
         st.info("No deliverables found in this RFP.")
         return
-    
+
     if isinstance(deliverables, list) and len(deliverables) > 0 and isinstance(deliverables[0], str):
         deliverables = [{"category": "General", "items": deliverables}]
-    
+
     category_counter = 1
     for cat_group in deliverables:
         category = cat_group.get('category', 'Uncategorized')
         items = cat_group.get('items', [])
-        
+
         if not items:
             continue
-        
+
         st.markdown(f"""
         <div style="
             background: linear-gradient(135deg, #1e1e3f, #2d2d5e);
@@ -105,7 +256,7 @@ def render_deliverables(deliverables, file_bytes=None, file_type=None, file_name
             </div>
         </div>
         """, unsafe_allow_html=True)
-        
+
         item_counter = 1
         for item in items:
             if isinstance(item, dict):
@@ -113,85 +264,77 @@ def render_deliverables(deliverables, file_bytes=None, file_type=None, file_name
                 section_ref = item.get('section_ref', 'N/A')
                 reason = item.get('reason', 'Required by RFP')
                 source_file = item.get('source_file', 'Unknown')
+                exact_text = item.get('exact_text', reason)
+                page_num = item.get('page_num', 'N/A')
             else:
                 item_name = item
                 section_ref = 'N/A'
                 reason = 'Required by RFP'
                 source_file = 'Unknown'
-            
-            # ✅ CLEAN: Remove any HTML tags from section_ref
+                exact_text = reason
+                page_num = 'N/A'
+
             section_ref_clean = re.sub(r'<[^>]+>', '', str(section_ref))
             section_ref_clean = section_ref_clean.replace('&lt;', '<').replace('&gt;', '>')
-            
-            # ✅ CLEAN: Show section reference as plain text with a small badge
-            section_display = f"📜 {section_ref_clean}" if section_ref_clean and section_ref_clean != 'N/A' else ""
-            
-            # ✅ CLEAN: Build reasoning with source file
+
             if source_file and source_file != 'Unknown' and source_file != 'Unknown file':
                 source_display = source_file.replace('", "', ', ').replace('"', '')
                 if ',' in source_display:
                     file_display = f"[From: {source_display}]"
                 else:
                     file_display = f"[From: {source_file}]"
-                full_reason = f"{file_display} {reason}"
             else:
-                full_reason = reason
-            
-            st.markdown(f"""
-            <div style="
-                display: flex;
-                flex-direction: column;
-                padding: 10px 0 10px 30px;
-                border-bottom: 1px solid rgba(255,255,255,0.05);
-            ">
-                <div style="display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;">
-                    <span style="
-                        font-size: 16px;
-                        font-weight: 600;
-                        color: #e0e0e0;
-                        min-width: 60px;
-                    ">
-                        {category_counter}.{item_counter}
-                    </span>
-                    <span style="
-                        font-size: 16px;
-                        color: #f0f0f0;
-                        flex: 1;
-                    ">
-                        {item_name}
-                    </span>
-                    <span style="
-                        font-size: 12px;
-                        color: #6c5ce7;
-                        background: rgba(108, 92, 231, 0.15);
-                        padding: 2px 12px;
-                        border-radius: 12px;
-                        border: 1px solid rgba(108, 92, 231, 0.2);
-                        white-space: nowrap;
-                    ">
-                        {section_display}
-                    </span>
-                </div>
+                file_display = ""
+
+            reason_text = f"{file_display} {reason}" if file_display else reason
+            section_display = section_ref_clean if section_ref_clean and section_ref_clean != 'N/A' else ''
+
+            card_col, btn_col = st.columns([7, 1])
+
+            with card_col:
+                st.markdown(f"""
                 <div style="
-                    font-size: 14px;
-                    color: #aaa;
-                    margin-top: 4px;
-                    padding-left: 60px;
-                    font-style: italic;
+                    display: flex;
+                    flex-direction: column;
+                    padding: 10px 0 10px 30px;
+                    border-bottom: 1px solid rgba(255,255,255,0.05);
                 ">
-                    💡 {full_reason}
+                    <div style="display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;">
+                        <span style="font-size: 16px; font-weight: 600; color: #e0e0e0; min-width: 60px;">
+                            {category_counter}.{item_counter}
+                        </span>
+                        <span style="font-size: 16px; color: #f0f0f0; flex: 1;">
+                            {item_name}
+                        </span>
+                        <span style="font-size: 12px; color: #6c5ce7; background: rgba(108, 92, 231, 0.15); padding: 2px 12px; border-radius: 12px; border: 1px solid rgba(108, 92, 231, 0.2); white-space: nowrap;">
+                            📜 {section_display}
+                        </span>
+                    </div>
+                    <div style="font-size: 14px; color: #aaa; margin-top: 4px; padding-left: 60px; font-style: italic;">
+                        💡 {reason_text}
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+
+            with btn_col:
+                if pdf_base64:
+                    btn_key = f"pdfview_{category_counter}_{item_counter}"
+                    if st.button("🔍 View", key=btn_key, help="Open the PDF and highlight this exact source line"):
+                        st.session_state['pdf_view_request'] = {
+                            'search': exact_text,
+                            'page': page_num,
+                            'label': item_name
+                        }
+                        st.rerun()
+
             item_counter += 1
-        
+
         category_counter += 1
 
 # ============================================================
-# PDF GENERATION FUNCTIONS (unchanged)
+# PDF GENERATION FUNCTIONS
 # ============================================================
 def generate_deliverables_pdf(deliverables, file_name=None):
-    """Generate a clean PDF containing only the deliverables section"""
     if not deliverables:
         return None
     
@@ -275,7 +418,6 @@ def generate_deliverables_pdf(deliverables, file_name=None):
                 reason = 'Required by RFP'
                 source_file = 'Unknown'
             
-            # Clean for PDF
             item_name = item_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             section_ref = section_ref.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             reason = reason.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -317,7 +459,6 @@ def generate_deliverables_pdf(deliverables, file_name=None):
     return buffer.getvalue()
 
 def generate_full_results_pdf(results, file_name=None):
-    """Generate a complete PDF containing all results"""
     if not results:
         return None
     
@@ -533,7 +674,10 @@ def generate_full_results_pdf(results, file_name=None):
 def main():
     st.title("📄 RFP Document Processor")
     st.markdown("---")
-    
+
+    if 'pdf_view_request' not in st.session_state:
+        st.session_state['pdf_view_request'] = None
+
     st.markdown("""
     ### 🤖 AI-Powered RFP Analysis with Company Checklist
     Upload your RFP document(s) or paste text directly.
@@ -563,9 +707,6 @@ def main():
         4. View Go/No-Go decision with detailed checklist
         """)
         
-        # ============================================================
-        # 🆕 FETCH ANALYSIS BY ID
-        # ============================================================
         st.markdown("---")
         st.subheader("🔍 Fetch Analysis by ID")
         fetch_id = st.text_input("Enter Analysis ID:", placeholder="e.g., RFP-20260727-a1b2c3d4")
@@ -581,12 +722,10 @@ def main():
                 else:
                     st.error("❌ Analysis ID not found. Please check the ID.")
         
-        # Show list of saved analyses
         st.markdown("---")
         st.subheader("📂 Saved Analyses")
         saved_ids = get_all_analysis_ids()
         if saved_ids:
-            # Show last 5 analyses
             for aid in saved_ids[-5:]:
                 st.code(aid, language="text")
             if len(saved_ids) > 5:
@@ -620,17 +759,22 @@ def main():
             st.write("📄 " + ", ".join(file_names))
             st.info(f"Total size: {total_size/1024:.1f} KB")
             
-            first_pdf_bytes = None
-            first_pdf_name = None
+            # ============================================================
+            # ✅ Store PDF bytes for the FIRST PDF found
+            # ============================================================
+            pdf_base64 = None
+            pdf_name = None
             for f in uploaded_files:
                 if f.name.lower().endswith('.pdf'):
-                    first_pdf_bytes = f.read()
-                    first_pdf_name = f.name
+                    f.seek(0)
+                    pdf_bytes = f.read()
+                    pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+                    pdf_name = f.name
                     break
             
-            st.session_state['file_bytes'] = first_pdf_bytes
-            st.session_state['file_type'] = 'pdf' if first_pdf_bytes else None
-            st.session_state['file_name'] = first_pdf_name
+            # Store in session state
+            st.session_state['pdf_base64'] = pdf_base64
+            st.session_state['pdf_name'] = pdf_name
             st.session_state['uploaded_file_names'] = [f.name for f in uploaded_files]
             
             if st.button("🚀 Process Documents", type="primary"):
@@ -666,9 +810,6 @@ def main():
                         go_no_go = processor.go_no_go_analysis(combined_text)
                         results['go_no_go'] = go_no_go
                         
-                        # ============================================================
-                        # 🆕 SAVE RESULTS WITH ANALYSIS ID
-                        # ============================================================
                         analysis_id = generate_analysis_id()
                         save_analysis_results(analysis_id, results)
                         st.session_state['analysis_id'] = analysis_id
@@ -699,8 +840,7 @@ def main():
             st.info(f"📝 {len(pasted_text)} characters pasted")
             st.session_state['text_input'] = pasted_text
             st.session_state['uploaded_files'] = None
-            st.session_state['file_bytes'] = None
-            st.session_state['file_type'] = None
+            st.session_state['pdf_base64'] = None
             st.session_state['uploaded_file_names'] = ["Pasted Text"]
             
             if st.button("🚀 Process Document", type="primary"):
@@ -716,9 +856,6 @@ def main():
                         go_no_go = processor.go_no_go_analysis(pasted_text)
                         results['go_no_go'] = go_no_go
                         
-                        # ============================================================
-                        # 🆕 SAVE RESULTS WITH ANALYSIS ID
-                        # ============================================================
                         analysis_id = generate_analysis_id()
                         save_analysis_results(analysis_id, results)
                         st.session_state['analysis_id'] = analysis_id
@@ -805,7 +942,6 @@ def main():
             
             st.markdown("### 📊 Overall Score")
             st.progress(min(score / 100, 1.0) if score > 0 else 0.0)
-            
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("✅ GO Items", go_no_go.get('go_count', 0))
@@ -881,19 +1017,37 @@ def main():
         st.info(results.get('project_summary', 'No summary available'))
         
         # ============================================================
-        # 📦 DELIVERABLES WITH SOURCE FILE INFO
+        # 📦 DELIVERABLES WITH "VIEW IN PDF" BUTTONS
         # ============================================================
         st.subheader("📦 Deliverables Required by RFP")
         deliverables = results.get('deliverables', [])
         
-        file_bytes = st.session_state.get('file_bytes', None)
-        file_type = st.session_state.get('file_type', None)
-        file_name = st.session_state.get('file_name', None)
+        pdf_base64 = st.session_state.get('pdf_base64', None)
+        pdf_name = st.session_state.get('pdf_name', None)
         
-        render_deliverables(deliverables, file_bytes, file_type, file_name)
+        if not pdf_base64:
+            st.caption("ℹ️ Upload the original PDF (not just paste text) to enable click-to-highlight source viewing.")
+        
+        render_deliverables(deliverables, pdf_base64, pdf_name)
+
+        # ============================================================
+        # 📄 EMBEDDED PDF VIEWER — shows when a "🔍 View" button is clicked
+        # ============================================================
+        if st.session_state.get('pdf_view_request') and pdf_base64:
+            req = st.session_state['pdf_view_request']
+            st.markdown("---")
+            header_col, close_col = st.columns([8, 1])
+            with header_col:
+                st.markdown(f"### 📄 PDF Viewer — {req.get('label', '')}")
+            with close_col:
+                if st.button("✖ Close", key="close_pdf_viewer"):
+                    st.session_state['pdf_view_request'] = None
+                    st.rerun()
+            viewer_html = build_pdf_viewer_html(pdf_base64, req.get('search', ''), req.get('page'))
+            components.html(viewer_html, height=820, scrolling=True)
         
         # ============================================================
-        # 📥 DOWNLOAD BUTTONS: Deliverables PDF & Full Results PDF
+        # 📥 DOWNLOAD BUTTONS
         # ============================================================
         st.markdown("---")
         st.subheader("📥 Download Reports")
@@ -902,7 +1056,7 @@ def main():
         
         with col1:
             if deliverables:
-                pdf_data = generate_deliverables_pdf(deliverables, file_name)
+                pdf_data = generate_deliverables_pdf(deliverables, pdf_name)
                 if pdf_data:
                     st.download_button(
                         label="📥 Download Deliverables PDF",
@@ -913,7 +1067,7 @@ def main():
                     )
         
         with col2:
-            full_pdf_data = generate_full_results_pdf(results, file_name)
+            full_pdf_data = generate_full_results_pdf(results, pdf_name)
             if full_pdf_data:
                 st.download_button(
                     label="📥 Download Full Report PDF",
@@ -926,7 +1080,7 @@ def main():
         st.markdown("---")
         
         # ============================================================
-        # 🆕 DOWNLOAD FULL JSON WITH ANALYSIS ID
+        # DOWNLOAD FULL JSON
         # ============================================================
         st.subheader("📥 Download Raw Data")
         
@@ -936,17 +1090,17 @@ def main():
             st.download_button(
                 label="📥 Download Full Analysis (JSON)",
                 data=json_str,
-                file_name=f"analysis_{analysis_id}.json",
-                mime="application/json",
+                file_name=f"analysis_{analysis_id}.txt",
+                mime="application/octet-stream",
                 use_container_width=True
             )
         with col2:
             if st.button("🔄 Process New Document", use_container_width=True):
                 st.session_state['processed'] = False
                 st.session_state['results'] = None
-                st.session_state['file_bytes'] = None
-                st.session_state['file_type'] = None
-                st.session_state['file_name'] = None
+                st.session_state['pdf_base64'] = None
+                st.session_state['pdf_name'] = None
+                st.session_state['pdf_view_request'] = None
                 st.rerun()
         
         st.markdown("---")
@@ -977,7 +1131,6 @@ def main():
         else:
             st.write(checklist)
         
-        # Analysis ID info
         st.caption(f"🔑 Analysis ID: `{analysis_id}`")
 
 if __name__ == "__main__":
