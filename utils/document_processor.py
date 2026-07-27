@@ -108,9 +108,10 @@ class RFPProcessor:
         "FILE: [filename]"
         "========================================"
         
-        **CRITICAL INSTRUCTION: For EVERY deliverable you identify, you MUST include the EXACT filename where it appears.**
-        
-        Look at the "FILE: [filename]" headers above each section of text to determine which file each deliverable came from.
+        **CRITICAL INSTRUCTION: For EVERY deliverable you identify, you MUST include:**
+        1. The EXACT filename where it appears
+        2. The EXACT text/line from the RFP that mentions this deliverable (for highlighting)
+        3. The page number where it appears (if available in the text)
         
         Total RFP text length: {len(text)} characters.
         
@@ -124,16 +125,17 @@ class RFPProcessor:
         2. "deliverables": Group deliverables into BUSINESS CATEGORIES (max 5-6 categories, max 5-6 items per category).
            For EACH deliverable, include:
            - "name": The deliverable name
-           - "section_ref": The section number where it appears (e.g., "Section XI.B.1", "Article IV", "Section 3.2")
-           - "reason": Why this deliverable is required (include the section reference)
-           - "source_file": The EXACT filename where this deliverable was found (e.g., "doc1.txt", "ODU_RFP_Part1.txt")
+           - "section_ref": The section number (e.g., "Section XI.B.1", "Article IV")
+           - "reason": Why this deliverable is required
+           - "source_file": The EXACT filename where this deliverable was found
+           - "exact_text": The EXACT quote/sentence from the RFP that mentions this deliverable (copy it word-for-word)
+           - "page_num": The page number where this appears (if mentioned, e.g., "Page 11")
         
-        3. "evaluation_criteria": List of criteria the client will use to judge proposals (flat list)
+        3. "evaluation_criteria": List of criteria (flat list)
         
-        4. "compliance_checklist": An object with departments as keys and lists of tasks as values
-           Departments: Legal, Accounting, Technical, Operations, HR
+        4. "compliance_checklist": Object with departments as keys and lists of tasks
         
-        Return ONLY valid JSON. DO NOT include any text outside the JSON.
+        Return ONLY valid JSON.
         
         Example format:
         {{
@@ -142,15 +144,14 @@ class RFPProcessor:
                 {{
                     "category": "Documentation & Forms",
                     "items": [
-                        {{"name": "RFP Cover Sheet", "section_ref": "Section XI.B.1", "reason": "Requires the return of the RFP cover sheet", "source_file": "doc1.txt"}},
-                        {{"name": "W-9 Form", "section_ref": "Section XI.B.2", "reason": "Requires a completed Substitute W-9 Form", "source_file": "doc2.txt"}},
-                        {{"name": "SWAM Plan", "section_ref": "Attachment D", "reason": "Requires Contractor's Proposed SWAM Plan", "source_file": "doc3.txt"}}
-                    ]
-                }},
-                {{
-                    "category": "Technical Requirements",
-                    "items": [
-                        {{"name": "IAM Software", "section_ref": "Section IV", "reason": "Requires IAM solution deployment", "source_file": "doc1.txt"}}
+                        {{
+                            "name": "RFP Cover Sheet",
+                            "section_ref": "Section XI.B.1",
+                            "reason": "Requires the return of the RFP cover sheet",
+                            "source_file": "doc1.txt",
+                            "exact_text": "The return of the RFP cover sheet and all addenda acknowledgments, if any, signed and filled out as required.",
+                            "page_num": "11"
+                        }}
                     ]
                 }}
             ],
@@ -170,30 +171,18 @@ class RFPProcessor:
             
             result = json.loads(json_str)
             
-            # Ensure deliverables is in the new format with source_file
+            # Ensure all deliverables have required fields
             if 'deliverables' in result:
-                if isinstance(result['deliverables'], list) and len(result['deliverables']) > 0:
-                    # If flat list (old format), convert
-                    if isinstance(result['deliverables'][0], str):
-                        flat_list = [{"name": item, "section_ref": "N/A", "reason": "Required by RFP", "source_file": "Unknown"} for item in result['deliverables']]
-                        result['deliverables'] = [{"category": "General", "items": flat_list}]
-                    # If old format without section_ref or source_file
-                    elif isinstance(result['deliverables'][0], dict) and 'items' in result['deliverables'][0]:
-                        for cat in result['deliverables']:
-                            if 'items' in cat:
-                                if len(cat['items']) > 0 and isinstance(cat['items'][0], str):
-                                    cat['items'] = [{"name": item, "section_ref": "N/A", "reason": "Required by RFP", "source_file": "Unknown"} for item in cat['items']]
-                                elif isinstance(cat['items'][0], dict) and 'name' in cat['items'][0]:
-                                    # Ensure each item has section_ref, reason, and source_file
-                                    for item in cat['items']:
-                                        if 'section_ref' not in item:
-                                            item['section_ref'] = 'N/A'
-                                        if 'reason' not in item:
-                                            item['reason'] = 'Required by RFP'
-                                        if 'source_file' not in item:
-                                            item['source_file'] = 'Unknown'
-                else:
-                    result['deliverables'] = []
+                for cat in result['deliverables']:
+                    if 'items' in cat:
+                        for item in cat['items']:
+                            if isinstance(item, dict):
+                                if 'source_file' not in item:
+                                    item['source_file'] = 'Unknown'
+                                if 'exact_text' not in item:
+                                    item['exact_text'] = item.get('reason', 'Required by RFP')
+                                if 'page_num' not in item:
+                                    item['page_num'] = 'N/A'
             
             return result
             
@@ -201,14 +190,8 @@ class RFPProcessor:
             return {
                 "project_summary": "Error processing document",
                 "deliverables": [],
-                "evaluation_criteria": ["Unable to extract evaluation criteria"],
-                "compliance_checklist": {
-                    "Legal": ["Unable to extract compliance tasks"],
-                    "Accounting": ["Unable to extract compliance tasks"],
-                    "Technical": ["Unable to extract compliance tasks"],
-                    "Operations": ["Unable to extract compliance tasks"],
-                    "HR": ["Unable to extract compliance tasks"]
-                },
+                "evaluation_criteria": ["Unable to extract"],
+                "compliance_checklist": {},
                 "error": str(e)
             }
     
