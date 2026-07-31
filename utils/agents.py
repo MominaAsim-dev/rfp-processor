@@ -8,7 +8,7 @@ this module splits that into five independent, single-responsibility agents:
     SummaryAgent                    -> project_summary
     DeliverablesAgent               -> deliverables (with section_ref/source_file/quote)
     EvaluationCriteriaAgent         -> evaluation_criteria
-    ComplianceChecklistAgent        -> compliance_checklist
+    FAQAgent                        -> faqs (20 short Q&A pairs about the RFP)
     GoNoGoAgent                     -> go/no-go scoring against the company checklist
 
 Why this shape:
@@ -85,7 +85,10 @@ class BaseAgent:
     def run(self, model, text: str) -> Dict[str, Any]:
         prompt = self.build_prompt(text)
         try:
-            response = model.generate_content(prompt)
+            response = model.generate_content(
+                prompt,
+                generation_config={"max_output_tokens": 8192, "temperature": 0.4},
+            )
             result = _loose_json_parse(response.text)
             return self.postprocess(result)
         except Exception as e:
@@ -218,44 +221,108 @@ class EvaluationCriteriaAgent(BaseAgent):
 
 
 # ============================================================
-# AGENT 4: Compliance Checklist
+# AGENT 4: Frequently Asked Questions
 # ============================================================
-class ComplianceChecklistAgent(BaseAgent):
-    name = "compliance_checklist"
+class FAQAgent(BaseAgent):
+    """
+    Reads the FULL RFP text and produces a set of short, practical
+    question-and-answer pairs — the kind of basic questions a proposal
+    team member (or someone deciding whether parts of the response process
+    could be automated) would actually ask about this specific RFP.
+    """
+
+    name = "faqs"
 
     def build_prompt(self, text: str) -> str:
         return f"""
-        You are an expert RFP analyst. Your ONLY job is to extract a COMPLIANCE CHECKLIST
-        broken out by internal department. Do not extract deliverables or criteria.
+        You are an expert RFP analyst. Read the ENTIRE RFP text below and produce
+        a Frequently Asked Questions (FAQ) list for someone who needs to quickly
+        understand this specific RFP without reading the whole document.
+
+        Include a mix of basic, practical questions such as: what is being
+        requested, who is the issuing organization, what is the submission
+        deadline, how should the proposal be submitted, what format is required,
+        who can be contacted with questions, what is the estimated
+        budget/contract value (if stated), what is the contract duration, what
+        are the key eligibility requirements, and whether any parts of the
+        submission/compliance process could realistically be automated.
+
+        Base every answer STRICTLY on what is actually stated in the RFP text
+        below. If the RFP does not state an answer to a reasonable question,
+        either skip that question or say the RFP does not specify it — do not
+        invent information.
 
         RFP TEXT:
         {text}
 
-        Departments to use as keys: Legal, Accounting, Technical, Operations, HR
+        HARD REQUIREMENTS (do not skip any of these):
+        - You MUST return exactly 20 question-and-answer pairs. This is mandatory.
+        - Every "answer" MUST be ONE short sentence, 20 words or fewer. This is
+          mandatory — long answers are not allowed, no exceptions.
+        - Output ONLY the JSON object below. No markdown fences, no commentary,
+          no text before or after the JSON. The response must start with {{ and
+          end with }}.
+        - The JSON must be complete and syntactically valid — do not cut it off
+          partway through.
 
-        Return ONLY valid JSON, no text outside the JSON:
+        Return ONLY this JSON shape:
         {{
-            "compliance_checklist": {{
-                "Legal": ["NDA required", "..."],
-                "Accounting": ["W-9 form", "..."],
-                "Technical": ["..."],
-                "Operations": ["..."],
-                "HR": ["..."]
-            }}
+            "faqs": [
+                {{"question": "What is this RFP asking for?", "answer": "A short, direct answer under 20 words."}}
+            ]
         }}
         """
 
+    def postprocess(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        faqs = result.get('faqs', [])
+        cleaned = []
+        for item in faqs:
+            if isinstance(item, dict) and item.get('question') and item.get('answer'):
+                cleaned.append({
+                    "question": str(item['question']).strip(),
+                    "answer": str(item['answer']).strip(),
+                })
+        result['faqs'] = cleaned
+        return result
+
+    def run(self, model, text: str) -> Dict[str, Any]:
+        prompt = self.build_prompt(text)
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config={"max_output_tokens": 8192, "temperature": 0.4},
+            )
+            raw_text = response.text
+            try:
+                result = _loose_json_parse(raw_text)
+            except Exception:
+                # Even if the outer JSON is malformed/truncated, salvage any
+                # complete {"question": ..., "answer": ...} pairs via regex
+                # rather than returning nothing.
+                salvaged = self._salvage_qa_pairs(raw_text)
+                if not salvaged:
+                    raise
+                result = {"faqs": salvaged}
+            return self.postprocess(result)
+        except Exception as e:
+            return self.fallback(str(e))
+
+    @staticmethod
+    def _salvage_qa_pairs(raw_text: str) -> List[Dict[str, str]]:
+        pattern = re.compile(
+            r'"question"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"answer"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            re.DOTALL,
+        )
+        pairs = []
+        for q, a in pattern.findall(raw_text):
+            q = q.replace('\\"', '"').strip()
+            a = a.replace('\\"', '"').strip()
+            if q and a:
+                pairs.append({"question": q, "answer": a})
+        return pairs
+
     def fallback(self, error: str) -> Dict[str, Any]:
-        return {
-            "compliance_checklist": {
-                "Legal": ["Unable to extract compliance tasks"],
-                "Accounting": ["Unable to extract compliance tasks"],
-                "Technical": ["Unable to extract compliance tasks"],
-                "Operations": ["Unable to extract compliance tasks"],
-                "HR": ["Unable to extract compliance tasks"],
-            },
-            "error": error,
-        }
+        return {"faqs": [], "error": error}
 
 
 # ============================================================
@@ -377,7 +444,7 @@ AGENT_REGISTRY = {
     "summary": SummaryAgent,
     "deliverables": DeliverablesAgent,
     "evaluation_criteria": EvaluationCriteriaAgent,
-    "compliance_checklist": ComplianceChecklistAgent,
+    "faqs": FAQAgent,
     "go_no_go": GoNoGoAgent,
 }
 
@@ -426,7 +493,7 @@ def run_agents_parallel(model, text: str) -> Dict[str, Any]:
         "project_summary": raw_results.get("summary", {}).get("project_summary", "No summary available"),
         "deliverables": raw_results.get("deliverables", {}).get("deliverables", []),
         "evaluation_criteria": raw_results.get("evaluation_criteria", {}).get("evaluation_criteria", []),
-        "compliance_checklist": raw_results.get("compliance_checklist", {}).get("compliance_checklist", {}),
+        "faqs": raw_results.get("faqs", {}).get("faqs", []),
         "go_no_go": raw_results.get("go_no_go", {}),
         "_agent_meta": {
             "total_elapsed_seconds": round(total_elapsed, 2),
