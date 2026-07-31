@@ -11,6 +11,7 @@ from utils.document_processor import (
     extract_raw_pages_from_pdf,
     get_highlighted_page_image,
 )
+from utils.agents import FAQAgent
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -82,6 +83,37 @@ def inject_theme_css(theme: dict):
 
     section[data-testid="stSidebar"] {{
         background-color: {theme['bg_secondary']};
+    }}
+
+    header[data-testid="stHeader"] {{
+        background-color: {theme['bg']} !important;
+    }}
+
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"],
+    button[data-testid="baseButton-headerNoPadding"] {{
+        background-color: {theme['card']} !important;
+        border-radius: 8px !important;
+    }}
+    [data-testid="stSidebarCollapseButton"] svg,
+    [data-testid="collapsedControl"] svg,
+    [data-testid="stSidebarCollapsedControl"] svg,
+    button[data-testid="baseButton-headerNoPadding"] svg,
+    header[data-testid="stHeader"] svg,
+    [data-testid="stSidebarCollapseButton"] svg *,
+    [data-testid="collapsedControl"] svg *,
+    [data-testid="stSidebarCollapsedControl"] svg *,
+    button[data-testid="baseButton-headerNoPadding"] svg *,
+    header[data-testid="stHeader"] svg *,
+    [data-testid="stSidebarCollapseButton"] svg path,
+    [data-testid="collapsedControl"] svg path,
+    [data-testid="stSidebarCollapsedControl"] svg path,
+    header[data-testid="stHeader"] svg path {{
+        fill: {theme['accent_dark']} !important;
+        color: {theme['accent_dark']} !important;
+        stroke: {theme['accent_dark']} !important;
+        opacity: 1 !important;
     }}
 
     h1, h2, h3, h4, .heading-font {{
@@ -491,9 +523,8 @@ def render_deliverables(deliverables, source_files_available=None):
                 if st.button(
                     "View Source",
                     key=f"view_pdf_{category_counter}_{item_counter}",
-                    disabled=not can_view,
                     help="Open the exact PDF page and highlight this deliverable"
-                    if can_view else "No PDF / source quote available for this item",
+                    if can_view else "No PDF is available for this item — click to see why",
                     use_container_width=True,
                 ):
                     request_pdf_view(source_file, quote, item_name)
@@ -647,52 +678,25 @@ def render_evaluation_criteria_section(criteria, theme, max_shown=6, max_chars=9
                 st.markdown(f"**{i}.** {item}")
 
 # ============================================================
-# RENDER: Compliance Checklist as a Department Table
+# RENDER: Frequently Asked Questions
 # ============================================================
-def render_compliance_table_section(compliance, theme, max_rows=6, max_chars=70):
-    if not compliance:
-        st.info("No compliance checklist extracted.")
+def render_faqs_section(faqs, theme):
+    if not faqs:
+        st.info("No FAQs were generated for this RFP.")
         return
 
-    departments = ["Legal", "Accounting", "Technical", "Operations", "HR"]
+    st.markdown(f"""
+    <div class="rfp-card">
+        <div class="rfp-card-title">Frequently Asked Questions</div>
+        <div class="rfp-card-sub">{len(faqs)} question(s) about this RFP, answered from the document itself</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    def _truncate(text, limit):
-        text = str(text)
-        return text if len(text) <= limit else text[:limit].rstrip() + "..."
-
-    columns_data = {}
-    overflow_notes = []
-    for dept in departments:
-        tasks = compliance.get(dept, [])
-        if isinstance(tasks, str):
-            tasks = [tasks]
-        shown_tasks = tasks[:max_rows]
-        if len(tasks) > max_rows:
-            overflow_notes.append(f"{dept} (+{len(tasks) - max_rows} more)")
-        columns_data[dept] = [_truncate(t, max_chars) for t in shown_tasks]
-
-    row_count = max((len(v) for v in columns_data.values()), default=0)
-    row_count = min(row_count, max_rows)
-
-    header_html = "".join(f"<th>{dept}</th>" for dept in departments)
-    rows_html = ""
-    for r in range(row_count):
-        cells = ""
-        for dept in departments:
-            cell_val = columns_data[dept][r] if r < len(columns_data[dept]) else "-"
-            cells += f"<td>{cell_val}</td>"
-        rows_html += f"<tr>{cells}</tr>"
-
-    table_html = f"""
-    <table class="rfp-table">
-        <thead><tr>{header_html}</tr></thead>
-        <tbody>{rows_html}</tbody>
-    </table>
-    """
-    st.markdown(table_html, unsafe_allow_html=True)
-
-    if overflow_notes:
-        st.caption("Additional tasks not shown here (see full JSON download): " + "; ".join(overflow_notes))
+    for i, item in enumerate(faqs, 1):
+        question = item.get('question', 'Unknown') if isinstance(item, dict) else str(item)
+        answer = item.get('answer', '') if isinstance(item, dict) else ''
+        with st.expander(f"{i}. {question}"):
+            st.markdown(answer)
 
 # ============================================================
 # PDF GENERATION FUNCTIONS (downloadable reports)
@@ -953,14 +957,17 @@ def generate_full_results_pdf(results, file_name=None):
             story.append(Paragraph(f"{i}. {criterion}", styles['Normal']))
         story.append(Spacer(1, 10))
 
-    compliance = results.get('compliance_checklist', {})
-    if compliance:
-        story.append(Paragraph("<b>Compliance Checklist</b>", styles['Heading2']))
-        for dept, tasks in compliance.items():
-            story.append(Paragraph(f"{dept} Department", styles['Heading3']))
-            for task in tasks:
-                story.append(Paragraph(f"- {task}", styles['Normal']))
-            story.append(Spacer(1, 5))
+    faqs = results.get('faqs', [])
+    if faqs:
+        story.append(Paragraph("<b>Frequently Asked Questions</b>", styles['Heading2']))
+        for i, item in enumerate(faqs, 1):
+            question = item.get('question', 'Unknown') if isinstance(item, dict) else str(item)
+            answer = item.get('answer', '') if isinstance(item, dict) else ''
+            question = str(question).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            answer = str(answer).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            story.append(Paragraph(f"<b>{i}. {question}</b>", styles['Normal']))
+            story.append(Paragraph(answer, styles['Normal']))
+            story.append(Spacer(1, 4))
 
     footer_style = ParagraphStyle(
         'Footer', parent=styles['Normal'], fontSize=8,
@@ -1023,12 +1030,26 @@ def main():
         3. Click "Process Document"
         4. View the Go/No-Go decision with detailed checklist
         5. Click **View Source** next to any deliverable to jump to its exact page, highlighted
-        6. Scroll to **Functional / Non-Functional Requirements** to see the classification
         """)
 
         st.markdown("---")
         st.subheader("Fetch Analysis by ID")
-        fetch_id = st.text_input("Enter Analysis ID:", placeholder="e.g., RFP-20260727-a1b2c3d4")
+
+        # Apply any "click an ID" selection BEFORE the text_input widget below
+        # is created. Writing directly to st.session_state['fetch_id_input']
+        # AFTER that widget already exists in this run raises
+        # StreamlitAPIException, so a clicked ID is staged here first and
+        # only ever applied pre-widget, on the next run.
+        if st.session_state.get('pending_fetch_id'):
+            st.session_state['fetch_id_input'] = st.session_state.pop('pending_fetch_id')
+        if 'fetch_id_input' not in st.session_state:
+            st.session_state['fetch_id_input'] = ""
+
+        fetch_id = st.text_input(
+            "Enter Analysis ID:",
+            placeholder="e.g., RFP-20260727-a1b2c3d4",
+            key="fetch_id_input"
+        )
         if st.button("Fetch Results", use_container_width=True):
             if fetch_id:
                 if load_analysis_into_session(fetch_id):
@@ -1039,6 +1060,7 @@ def main():
 
         st.markdown("---")
         st.subheader("Saved Analyses")
+        st.caption("Click an ID to fill it in above, then press Fetch Results.")
         saved_ids = get_all_analysis_ids()
         if saved_ids:
             recent_ids = saved_ids[-5:][::-1]
@@ -1046,15 +1068,15 @@ def main():
 
             for aid in recent_ids:
                 if st.button(aid, key=f"saved_id_{aid}", use_container_width=True):
-                    if load_analysis_into_session(aid):
-                        st.rerun()
+                    st.session_state['pending_fetch_id'] = aid
+                    st.rerun()
 
             if older_ids:
                 with st.expander(f"Show {len(older_ids)} more"):
                     for aid in older_ids:
                         if st.button(aid, key=f"saved_id_more_{aid}", use_container_width=True):
-                            if load_analysis_into_session(aid):
-                                st.rerun()
+                            st.session_state['pending_fetch_id'] = aid
+                            st.rerun()
         else:
             st.caption("No saved analyses yet.")
 
@@ -1181,10 +1203,11 @@ def main():
                         results = processor.run_full_analysis(pasted_text)
 
                         analysis_id = generate_analysis_id()
-                        save_analysis_results(analysis_id, results)
+                        save_analysis_results(analysis_id, results, combined_text=pasted_text)
                         st.session_state['analysis_id'] = analysis_id
                         st.session_state['results'] = results
                         st.session_state['processed'] = True
+                        st.session_state['combined_text'] = pasted_text
                         clear_pdf_view()
 
                     st.success("Document processed successfully")
@@ -1238,7 +1261,7 @@ def main():
                         "summary": "Summary Agent",
                         "deliverables": "Deliverables Agent",
                         "evaluation_criteria": "Evaluation Criteria Agent",
-                        "compliance_checklist": "Compliance Checklist Agent",
+                        "faqs": "FAQ Agent",
                         "go_no_go": "Go/No-Go Agent",
                     }
                     for agent_name, seconds in per_agent.items():
@@ -1260,16 +1283,21 @@ def main():
         pdf_files_bytes = st.session_state.get('pdf_files_bytes', {})
         source_files_available = set(pdf_files_bytes.keys())
 
+        if source_files_available:
+            st.caption(f"Source PDF(s) available for this analysis: {', '.join(sorted(source_files_available))}")
+        else:
+            st.caption(
+                "No source PDF is available for this analysis (either the original file(s) "
+                "weren't PDFs, or this analysis was saved before PDF source-viewing was added). "
+                "'View Source' will still tell you why when clicked."
+            )
+
         render_deliverables(deliverables, source_files_available)
         render_pdf_viewer(theme)
 
         st.markdown("---")
         st.subheader("Evaluation Criteria")
         render_evaluation_criteria_section(results.get('evaluation_criteria', []), theme)
-
-        st.markdown("---")
-        st.subheader("Compliance Checklist")
-        render_compliance_table_section(results.get('compliance_checklist', {}), theme)
 
         st.markdown("---")
         st.subheader("Add More Files to This Analysis")
@@ -1405,6 +1433,47 @@ def main():
                 st.session_state['pdf_raw_pages'] = {}
                 clear_pdf_view()
                 st.rerun()
+
+        st.markdown("---")
+        st.subheader("Frequently Asked Questions")
+        st.caption("Generated from the full RFP text — quick answers to the questions a proposal team usually asks first.")
+
+        existing_faqs = results.get('faqs', [])
+        if existing_faqs:
+            render_faqs_section(existing_faqs, theme)
+        else:
+            st.info("No FAQs are saved for this analysis yet.")
+            can_regenerate = bool(st.session_state.get('combined_text'))
+            if can_regenerate:
+                if st.button("Generate FAQs Now", key="regen_faqs_btn", type="primary"):
+                    if not api_key:
+                        st.error("Please provide your Gemini API key in the sidebar")
+                    else:
+                        with st.spinner("Reading the full RFP and generating FAQs..."):
+                            try:
+                                processor = RFPProcessor(api_key)
+                                faq_result = FAQAgent().run(processor.model, st.session_state['combined_text'])
+                                new_faqs = faq_result.get('faqs', [])
+                                results['faqs'] = new_faqs
+                                st.session_state['results'] = results
+                                save_analysis_results(
+                                    analysis_id, results,
+                                    st.session_state.get('pdf_files_bytes', {}),
+                                    st.session_state.get('pdf_raw_pages', {}),
+                                    st.session_state.get('combined_text', '')
+                                )
+                                if not new_faqs:
+                                    st.warning("The AI didn't return usable FAQs this time — try again.")
+                                else:
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"Error generating FAQs: {str(e)}")
+            else:
+                st.caption(
+                    "The original RFP text isn't available in this session (this analysis "
+                    "predates FAQ generation, or was loaded without its source text), so FAQs "
+                    "can't be generated automatically. Re-upload and reprocess to enable this."
+                )
 
         st.markdown("---")
         st.caption(f"Analysis ID: `{analysis_id}`")
