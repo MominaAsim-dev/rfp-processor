@@ -184,6 +184,21 @@ def inject_theme_css(theme: dict):
         color: {theme['accent_dark']};
     }}
 
+    .rfp-tally-box {{
+        display: inline-flex;
+        gap: 10px;
+        background: rgba(255,255,255,0.45);
+        border: 1px solid {theme['card_border']};
+        border-radius: 10px;
+        padding: 4px 12px;
+        margin-top: 6px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    .rfp-tally-go {{ color: {theme['go']}; }}
+    .rfp-tally-nogo {{ color: {theme['nogo']}; }}
+    .rfp-tally-escalate {{ color: {theme['escalate']}; }}
+
     .rfp-card-sub {{
         font-size: 13px;
         color: {theme['text_muted']};
@@ -210,6 +225,32 @@ def inject_theme_css(theme: dict):
         color: {theme['text_muted']};
         margin-top: 3px;
         padding-left: 8px;
+        font-style: italic;
+    }}
+
+    .rfp-source-box {{
+        background: rgba(255,255,255,0.4);
+        border: 1px solid {theme['card_border']};
+        border-radius: 10px;
+        padding: 8px 14px;
+        margin: 6px 0 4px 8px;
+    }}
+    .rfp-source-box .source-label {{
+        font-size: 11px;
+        font-weight: 700;
+        color: {theme['accent_dark']};
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+    }}
+    .rfp-source-box .source-file {{
+        font-size: 12px;
+        color: {theme['text_muted']};
+        word-break: break-word;
+        margin-bottom: 4px;
+    }}
+    .rfp-source-box .source-reason {{
+        font-size: 13px;
+        color: {theme['text']};
         font-style: italic;
     }}
 
@@ -245,7 +286,20 @@ def inject_theme_css(theme: dict):
     .decision-summary {{
         font-size: 15px;
         color: {theme['text']};
-        margin-top: 10px;
+        margin-top: 14px;
+        text-align: left;
+        background: rgba(255,255,255,0.35);
+        border-radius: 10px;
+        padding: 10px 16px;
+    }}
+    .decision-summary-label {{
+        font-family: 'Baloo 2', cursive;
+        font-size: 13px;
+        font-weight: 700;
+        color: {theme['accent_dark']};
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
     }}
 
     .rfp-table {{
@@ -499,14 +553,15 @@ def render_deliverables(deliverables, source_files_available=None):
 
             if source_file and source_file != 'Unknown' and source_file != 'Unknown file':
                 source_display = source_file.replace('", "', ', ').replace('"', '')
-                file_display = f"[From: {source_display}]" if ',' in source_display else f"[From: {source_file}]"
-                full_reason = f"{file_display} {reason}"
             else:
-                full_reason = reason
+                source_display = ""
 
             row_col1, row_col2 = st.columns([9, 1])
 
             with row_col1:
+                source_html = ""
+                if source_display:
+                    source_html = f'<div class="source-file">Source File: {source_display}</div>'
                 st.markdown(f"""
                 <div class="rfp-item-row">
                     <div style="display:flex; align-items:baseline; flex-wrap:wrap; gap:8px;">
@@ -514,7 +569,11 @@ def render_deliverables(deliverables, source_files_available=None):
                         <span style="flex:1;">{item_name}</span>
                         <span class="rfp-badge">{section_display}</span>
                     </div>
-                    <div class="rfp-reason">{full_reason}</div>
+                    <div class="rfp-source-box">
+                        <div class="source-label">Reason</div>
+                        {source_html}
+                        <div class="source-reason">{reason}</div>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -564,7 +623,10 @@ def render_go_no_go_dashboard(go_no_go, theme):
         <div class="decision-box" style="border-color:{border_color};">
             <div class="decision-title" style="color:{border_color};">{decision}</div>
             <div class="decision-score">Score: {min(100, round(score))} / 100</div>
-            <div class="decision-summary">{go_no_go.get('summary', '')}</div>
+            <div class="decision-summary">
+                <div class="decision-summary-label">Why</div>
+                {go_no_go.get('summary', 'No reasoning was provided for this decision.')}
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -613,10 +675,19 @@ def render_checklist_section(checklist, theme):
         categories.setdefault(cat, []).append(item)
 
     for category, items in categories.items():
+        cat_go = sum(1 for i in items if i.get('status') == 'GO')
+        cat_nogo = sum(1 for i in items if i.get('status') == 'NO-GO')
+        cat_conditional = len(items) - cat_go - cat_nogo
+
         st.markdown(f"""
         <div class="rfp-card">
             <div class="rfp-card-title">{category} Department</div>
             <div class="rfp-card-sub">{len(items)} item(s) evaluated</div>
+            <div class="rfp-tally-box">
+                <span class="rfp-tally-go">GO: {cat_go}</span>
+                <span class="rfp-tally-nogo">NO-GO: {cat_nogo}</span>
+                <span class="rfp-tally-escalate">Conditional: {cat_conditional}</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
