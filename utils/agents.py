@@ -61,6 +61,25 @@ def _loose_json_parse(raw_text: str) -> Dict[str, Any]:
         raise
 
 
+def _describe_empty_response(response) -> str:
+    """Best-effort explanation for why a model response had no text, so the
+    fallback error message is diagnosable instead of a bare JSON error."""
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            prompt_feedback = getattr(response, "prompt_feedback", None)
+            block_reason = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+            if block_reason:
+                return f"blocked by safety filters, block_reason={block_reason}"
+            return "no candidates returned, likely blocked by safety filters or an API issue"
+        finish_reason = getattr(candidates[0], "finish_reason", None)
+        if finish_reason:
+            return f"finish_reason={finish_reason}"
+    except Exception:
+        pass
+    return "no further detail available"
+
+
 class BaseAgent:
     """
     A single-responsibility RFP analysis agent.
@@ -73,6 +92,26 @@ class BaseAgent:
 
     name = "base"
 
+    # Appended to every agent's prompt. The single most common cause of
+    # broken JSON from the model is a literal double-quote character inside
+    # a string value (e.g. quoting the RFP's exact wording verbatim,
+    # quotation marks and all) — JSON has no way to tell that apart from a
+    # string terminator unless it's escaped, and models frequently forget to
+    # escape it. Instructing the model to avoid the character entirely is
+    # far more reliable than trying to repair it after the fact.
+    JSON_SAFETY_INSTRUCTIONS = """
+
+        CRITICAL JSON SAFETY RULE: Never place a literal double-quote (")
+        character inside any JSON string value (this applies to every field,
+        including "reason", "evidence", "quote", "summary", "answer", etc.).
+        If you need to reference wording from the source text that itself
+        contains quotation marks, either paraphrase it slightly or replace the
+        inner quotation marks with single quotes ('). A single unescaped
+        double-quote inside a string value makes the entire JSON response
+        invalid and unusable, so this rule overrides any instruction above
+        that could tempt you to quote text verbatim with double quotes.
+        """
+
     def build_prompt(self, text: str) -> str:
         raise NotImplementedError
 
@@ -83,16 +122,25 @@ class BaseAgent:
         return result
 
     def run(self, model, text: str) -> Dict[str, Any]:
-        prompt = self.build_prompt(text)
-        try:
-            response = model.generate_content(
-                prompt,
-                generation_config={"max_output_tokens": 8192, "temperature": 0.4},
-            )
-            result = _loose_json_parse(response.text)
-            return self.postprocess(result)
-        except Exception as e:
-            return self.fallback(str(e))
+        prompt = self.build_prompt(text) + self.JSON_SAFETY_INSTRUCTIONS
+        last_error = "Unknown error"
+        for attempt in range(2):  # one retry in case of a transient empty/blocked response
+            try:
+                response = model.generate_content(
+                    prompt,
+                    generation_config={"max_output_tokens": 8192, "temperature": 0.4},
+                )
+                raw_text = getattr(response, "text", "") or ""
+                if not raw_text.strip():
+                    raise ValueError(
+                        f"Model returned an empty response ({_describe_empty_response(response)})."
+                    )
+                result = _loose_json_parse(raw_text)
+                return self.postprocess(result)
+            except Exception as e:
+                last_error = str(e)
+                continue
+        return self.fallback(last_error)
 
 
 # ============================================================
@@ -140,6 +188,13 @@ class DeliverablesAgent(BaseAgent):
         Copy the exact characters as they appear in the RFP TEXT, including original
         spelling/punctuation. This is used to programmatically locate and highlight the
         deliverable inside the source PDF.**
+
+        **EXCEPTION for the "quote" field only: if the ideal 5-15 word span from the
+        RFP text would itself contain a double-quote character ("), shift the start or
+        end of the quote by a few words (staying within the same sentence/area) so the
+        chosen quote contains NO double-quote character at all, while still being an
+        exact verbatim substring of the RFP text. Never let a quote value include a
+        literal " character — pick a nearby span that avoids it instead.**
 
         RFP TEXT:
         {text}
@@ -195,6 +250,60 @@ class DeliverablesAgent(BaseAgent):
 
     def fallback(self, error: str) -> Dict[str, Any]:
         return {"deliverables": [], "error": error}
+
+    def run(self, model, text: str) -> Dict[str, Any]:
+        prompt = self.build_prompt(text) + self.JSON_SAFETY_INSTRUCTIONS
+        last_error = "Unknown error"
+        for attempt in range(2):  # one retry in case of a transient empty/blocked response
+            try:
+                response = model.generate_content(
+                    prompt,
+                    generation_config={"max_output_tokens": 8192, "temperature": 0.4},
+                )
+                raw_text = getattr(response, "text", "") or ""
+                if not raw_text.strip():
+                    raise ValueError(
+                        f"Model returned an empty response ({_describe_empty_response(response)})."
+                    )
+                try:
+                    result = _loose_json_parse(raw_text)
+                except Exception:
+                    # If the outer JSON is broken (most often a stray unescaped
+                    # quote inside one "quote" field), salvage any individual
+                    # deliverable objects that are still well-formed via regex,
+                    # rather than discarding every deliverable the model found.
+                    salvaged = self._salvage_deliverables(raw_text)
+                    if not salvaged:
+                        raise
+                    result = {"deliverables": [{"category": "Recovered Items", "items": salvaged}]}
+                return self.postprocess(result)
+            except Exception as e:
+                last_error = str(e)
+                continue
+        return self.fallback(last_error)
+
+    @staticmethod
+    def _salvage_deliverables(raw_text: str) -> List[Dict[str, str]]:
+        pattern = re.compile(
+            r'"name"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*'
+            r'"section_ref"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*'
+            r'"reason"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*'
+            r'"source_file"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*'
+            r'"quote"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            re.DOTALL,
+        )
+        items = []
+        for name, section_ref, reason, source_file, quote in pattern.findall(raw_text):
+            unescape = lambda s: s.replace('\\"', '"').strip()
+            if unescape(name):
+                items.append({
+                    "name": unescape(name),
+                    "section_ref": unescape(section_ref) or "N/A",
+                    "reason": unescape(reason) or "Required by RFP",
+                    "source_file": unescape(source_file) or "Unknown",
+                    "quote": unescape(quote),
+                })
+        return items
 
 
 # ============================================================
@@ -286,26 +395,34 @@ class FAQAgent(BaseAgent):
         return result
 
     def run(self, model, text: str) -> Dict[str, Any]:
-        prompt = self.build_prompt(text)
-        try:
-            response = model.generate_content(
-                prompt,
-                generation_config={"max_output_tokens": 8192, "temperature": 0.4},
-            )
-            raw_text = response.text
+        prompt = self.build_prompt(text) + self.JSON_SAFETY_INSTRUCTIONS
+        last_error = "Unknown error"
+        for attempt in range(2):  # one retry in case of a transient empty/blocked response
             try:
-                result = _loose_json_parse(raw_text)
-            except Exception:
-                # Even if the outer JSON is malformed/truncated, salvage any
-                # complete {"question": ..., "answer": ...} pairs via regex
-                # rather than returning nothing.
-                salvaged = self._salvage_qa_pairs(raw_text)
-                if not salvaged:
-                    raise
-                result = {"faqs": salvaged}
-            return self.postprocess(result)
-        except Exception as e:
-            return self.fallback(str(e))
+                response = model.generate_content(
+                    prompt,
+                    generation_config={"max_output_tokens": 8192, "temperature": 0.4},
+                )
+                raw_text = getattr(response, "text", "") or ""
+                if not raw_text.strip():
+                    raise ValueError(
+                        f"Model returned an empty response ({_describe_empty_response(response)})."
+                    )
+                try:
+                    result = _loose_json_parse(raw_text)
+                except Exception:
+                    # Even if the outer JSON is malformed/truncated, salvage any
+                    # complete {"question": ..., "answer": ...} pairs via regex
+                    # rather than returning nothing.
+                    salvaged = self._salvage_qa_pairs(raw_text)
+                    if not salvaged:
+                        raise
+                    result = {"faqs": salvaged}
+                return self.postprocess(result)
+            except Exception as e:
+                last_error = str(e)
+                continue
+        return self.fallback(last_error)
 
     @staticmethod
     def _salvage_qa_pairs(raw_text: str) -> List[Dict[str, str]]:
@@ -386,7 +503,7 @@ class GoNoGoAgent(BaseAgent):
             "go_count": 10,
             "no_go_count": 0,
             "escalate_count": 2,
-            "summary": "We should bid with escalation items"
+            "summary": "2-3 sentences explaining WHY this decision was reached, citing the specific strongest factors and, if any exist, naming the specific escalation/no-go items that need attention. Do not write generic filler like 'this is a strong opportunity' without saying what makes it strong."
         }}
 
         IMPORTANT: DO NOT include "overall_score" in your JSON. It is calculated automatically.
